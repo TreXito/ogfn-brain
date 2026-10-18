@@ -1,0 +1,8 @@
+build/
+logs/
+
+# Never commit any Epic binary, asset or emulator config. This repo is clean room.
+*.pak
+*.dll
+*.exe
+*.sig
