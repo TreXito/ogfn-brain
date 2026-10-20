@@ -90,6 +90,7 @@ if [[ -f "$BENCH" ]]; then
   revives=$(grep -oP 'squad: revives \K[0-9]+' "$BENCH" | head -1)
   focus=$(grep -oP 'focus calls \K[0-9]+' "$BENCH" | head -1)
   spread=$(grep -oP 'spread orders \K[0-9]+' "$BENCH" | head -1)
+  gazep50=$(grep -oP 'gaze: view off travel p50=\K[0-9]+' "$BENCH" | head -1)
 
   check() { # name value min max
     local name="$1" v="$2" lo="$3" hi="$4"
@@ -126,6 +127,7 @@ if [[ -f "$BENCH" ]]; then
       report "  squad $name: $val (ok)"
     fi
   done
+  check "gaze off travel p50 (deg)" "$gazep50" 0 20 || FAILED=1
   if [[ -n "$lootorigin" && "$lootorigin" -gt 0 ]]; then
     report "  loot with no destination: $lootorigin (move_to at the origin bug)"
     FAILED=1

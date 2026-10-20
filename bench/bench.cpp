@@ -65,6 +65,13 @@ struct Stats {
   int focus_calls = 0;
   int spread_orders = 0;
   int help_calls = 0;
+  // Gaze: how far the view sits from the travel line when not fighting. A bot that
+  // walks sideways with its crosshair on nothing is a tell (previously the median
+  // offset was 85 degrees).
+  // Store every sample, because the MEDIAN is the right statistic here: a shoulder
+  // check legitimately puts the view 70 degrees off travel for a second, and a mean
+  // punishes that. What matters is that the bot is usually facing where it walks.
+  std::vector<float> gaze_offs;
   bool last_crouch = false;
   std::vector<float> burst_lengths;
 };
@@ -202,6 +209,29 @@ Stats run_life(uint64_t seed, double minutes, bool in_squad = false) {
       }
       brain.observe(obs, t);
     }
+    // Locomotion runs BEFORE the brain: the brain consumes the gaze direction and the
+    // travel target, so the view and the legs have to be resolved first. This is also
+    // what a real client does (input -> movement state -> decision -> aim).
+    const bool engaged_now = w.target_is_visible && w.target_distance < 70.f;
+    const float travel_yaw = yaw_between(w.self_pos, w.circle_next_center_x == 0.f &&
+                                                            w.circle_next_center_y == 0.f
+                                             ? Vec3(1.f, 0.f, 0.f)
+                                             : Vec3(w.circle_next_center_x,
+                                                    w.circle_next_center_y, 0.f));
+    MoveState ms;
+    ms.airborne = false;
+    ms.has_cover = w.target_is_visible && w.target_distance < 30.f && (i % 240 < 90);
+    ms.on_slope = (i % 900) > 780;
+    const float health_frac_pre = clampf((w.self_health + w.self_shield) / 200.f, 0.f, 1.f);
+    const MoveOutput mo = loco.update(dt, yaw,
+                                      w.target_is_visible ? yaw_between(self_pos, Vec3(w.target_distance, 0.f, 0.f)) : yaw,
+                                      w.target_distance, engaged_now, false,
+                                      w.target_is_reloading, health_frac_pre, ms, travel_yaw, /*travel_supplied*/ true);
+    brain.set_gaze(mo.gaze_weight > 0.f, mo.gaze_yaw_deg);
+    w.travelling = true;
+    w.travel_to = Vec3(w.self_pos.x + std::cos(deg2rad(travel_yaw)) * 10.f,
+                       w.self_pos.y + std::sin(deg2rad(travel_yaw)) * 10.f, 0.f);
+
     const Decision d = brain.think(w);
     ++s.frames;
     s.action_counts[to_string(d.action)]++;
@@ -243,17 +273,7 @@ Stats run_life(uint64_t seed, double minutes, bool in_squad = false) {
     ++s.aim_error_n;
     s.build_inputs += motor.build_inputs_this_tick(dt);
 
-    // Locomotion: the third leg of the human-motor tell, after aim and trigger.
-    MoveState ms;
-    ms.airborne = false;
-    ms.has_cover = w.target_is_visible && w.target_distance < 30.f && (i % 240 < 90);
-    ms.on_slope = (i % 900) > 780;
-    const float health_frac = clampf((w.self_health + w.self_shield) / 200.f, 0.f, 1.f);
-    const MoveOutput mo = loco.update(dt, yaw,
-                                      w.target_is_visible ? yaw_between(self_pos, Vec3(w.target_distance, 0.f, 0.f)) : yaw,
-                                      w.target_distance, d.action == ActionKind::Engage ||
-                                                             d.action == ActionKind::Build,
-                                      out.firing, w.target_is_reloading, health_frac, ms);
+    // Locomotion already ran above (before the decision).
     if (mo.strafing) ++s.strafe_ticks;
     if (mo.crouching) ++s.crouch_ticks;
     if (mo.crouching != s.last_crouch) ++s.crouch_changes;
@@ -267,7 +287,18 @@ Stats run_life(uint64_t seed, double minutes, bool in_squad = false) {
     // then walks around its own wall is not building, it is hiding.
     const bool taking_fire = w.target_is_visible && w.self_health < 70.f;
     const BuildInput bi = builder.update(dt, d.action == ActionKind::Build, taking_fire,
-                                         health_frac, 0.f, true);
+                                         health_frac_pre, 0.f, true);
+    // Gaze alignment while travelling out of combat. Measured against the travel
+    // direction the movement layer was given (travel_yaw), which is what the bot
+    // decided to walk toward; d.move_to is the rotation TARGET (offset inside the
+    // ring), so comparing to that would measure the offset, not the gaze.
+    if (d.face_travel && !(d.action == ActionKind::Engage) && !(d.action == ActionKind::Build)) {
+      const float off = std::fabs(wrap180(d.look_yaw_deg - travel_yaw));
+      if (off < 180.f) {
+        s.gaze_offs.push_back(off);
+      }
+    }
+
     // Squad: focus calls and revives are the two that change what a bot does.
     if (brain.squad_directive().focus_target_id != 0) ++s.focus_calls;
     // Count episodes, not ticks: "revives per minute" is a rate people can reason
@@ -325,6 +356,7 @@ int main(int argc, char** argv) {
   Stats total;
   std::vector<float> all_intervals;
   std::vector<float> all_bursts;
+  std::vector<float> all_gaze;
   std::vector<float> reaction_ms;
   int distinct_actions_total = 0;
 
@@ -354,6 +386,7 @@ int main(int argc, char** argv) {
     total.focus_calls += s.focus_calls;
     total.spread_orders += s.spread_orders;
     total.help_calls += s.help_calls;
+    all_gaze.insert(all_gaze.end(), s.gaze_offs.begin(), s.gaze_offs.end());
     total.loot_decisions += s.loot_decisions;
     total.loot_no_target += s.loot_no_target;
     total.loot_walked_to_origin += s.loot_walked_to_origin;
@@ -393,6 +426,10 @@ int main(int argc, char** argv) {
               static_cast<float>(total.build_inputs) / (denom / 60.f));
   std::printf("time in contact: %.1f%% of life\n",
               100.f * total.time_hurt / (total.time_hurt + total.time_safe));
+  if (!all_gaze.empty())
+    std::printf("gaze: view off travel p50=%.0f p90=%.0f deg while moving "
+                "(p50 wants <20: the bot faces where it walks)\n",
+                pct(all_gaze, 0.50f), pct(all_gaze, 0.90f));
   std::printf("squad: revives %d  focus calls %d  spread orders %d  help calls %d\n",
               total.revives, total.focus_calls, total.spread_orders, total.help_calls);
   {
@@ -507,6 +544,14 @@ int main(int argc, char** argv) {
     std::printf("\nFAIL %.2f revive episodes per bot-minute (want <1: revive re-arming "
                 "continuously)\n", revive_per_life);
     ++failures;
+  }
+  if (!all_gaze.empty()) {
+    const float gaze50 = pct(all_gaze, 0.50f);
+    if (gaze50 > 20.f) {
+      std::printf("\nFAIL view is %.0f deg off the travel line at the median (want <20: the\n"
+                  "bot walks sideways staring at nothing)\n", gaze50);
+      ++failures;
+    }
   }
   if (total.loot_decisions == 0) {
     std::printf("\nFAIL bots never decide to loot\n");

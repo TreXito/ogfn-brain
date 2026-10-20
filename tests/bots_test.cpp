@@ -555,6 +555,88 @@ static void test_locomotion_strafes_in_a_fight_not_on_a_metronome() {
   }
 }
 
+static void test_gaze_follows_travel_out_of_combat() {
+  std::printf("locomotion: looks where it walks, looks at the fight in one\n");
+  {
+    Locomotion loc(persona_rotator(), 95);
+    MoveState st;
+    int aligned = 0, total = 0;
+    for (int i = 0; i < 60 * 30; ++i) {
+      const float travel = 40.f;   // walking toward 40 deg
+      const MoveOutput o = loc.update(1.f / 60.f, 0.f, 0.f, 500.f, false, false, false,
+                                      1.f, st, travel, /*travel_supplied*/ true);
+      CHECK(o.gaze_weight > 0.f, "out of combat the view follows travel");
+      // A shoulder-check is allowed to look away, but most of the time the view is
+      // near the travel direction, which is what a player looks like.
+      const float off = std::fabs(wrap180(o.gaze_yaw_deg - travel));
+      ++total;
+      if (off < 35.f) ++aligned;
+    }
+    const float frac = static_cast<float>(aligned) / static_cast<float>(total);
+    CHECK(frac > 0.6f, "the view is on the travel line most of the time");
+    CHECK(frac < 1.f, "but it does glance sideways sometimes (shoulder checks)");
+  }
+  {
+    // Standing still with nowhere to go: no travel to face, so the view HOLDS.
+    // Without this the glance was relative to an arbitrary heading and the bot
+    // pirouetted in place while idle, which also swept its perception FOV around.
+    Locomotion loc(persona_rotator(), 99);
+    MoveState st;
+    bool swept = false;
+    for (int i = 0; i < 60 * 20; ++i) {
+      const MoveOutput o = loc.update(1.f / 60.f, 30.f, 0.f, 500.f, false, false, false,
+                                      1.f, st, 0.f, /*travel_supplied*/ false);
+      CHECK(o.gaze_weight == 0.f, "no gaze order when there is nowhere to go");
+      if (std::fabs(wrap180(o.gaze_yaw_deg - 30.f)) > 0.01f) swept = true;
+    }
+    CHECK(!swept, "the view holds instead of sweeping while idle");
+  }
+  {
+    // In a fight, the view belongs to the target: you do not admire the scenery.
+    Locomotion loc(persona_rotator(), 96);
+    MoveState st;
+    for (int i = 0; i < 60 * 10; ++i) {
+      const MoveOutput o = loc.update(1.f / 60.f, 0.f, -20.f, 18.f, true, true, false,
+                                      0.9f, st, 120.f, true);
+      CHECK(o.gaze_weight == 0.f, "in combat the movement layer does not steal the camera");
+    }
+  }
+}
+
+static void test_brain_decision_faces_travel() {
+  std::printf("brain: movement decisions carry a look direction\n");
+  {
+    Brain b(persona_rotator(), 97);
+    WorldSnapshot w = peaceful_world();
+    w.self_pos = Vec3(0.f, 0.f, 0.f);
+    w.distance_to_circle_edge = 60.f;
+    w.circle_next_center_x = 100.f;
+    w.circle_next_center_y = 0.f;
+    w.circle_radius = 100.f;
+    const Decision d = b.think(w);
+    CHECK(d.face_travel, "a rotation carries a look direction");
+    // Walking east: the view must point roughly east, not somewhere unrelated.
+    const float off = std::fabs(wrap180(d.look_yaw_deg - yaw_between(w.self_pos, d.move_to)));
+    CHECK(off < 35.f, "and it looks roughly where it is going");
+  }
+  {
+    // Holding an angle: standing still, so no travel to face, but the decision still
+    // reports a look direction rather than leaving it at zero.
+    Brain b(persona_camper(), 98);
+    WorldSnapshot w = peaceful_world();
+    w.self_pos = Vec3(400.f, -200.f, 0.f);
+    w.self_yaw_deg = 77.f;
+    w.enemies_within_30m = 2;
+    b.prime_action(ActionKind::HoldAngle, w.time);
+    const Decision d = b.think(w);
+    if (d.action == ActionKind::HoldAngle) {
+      CHECK(!d.face_travel, "holding an angle does not face travel");
+      CHECK(std::fabs(wrap180(d.look_yaw_deg - 77.f)) < 1.f,
+            "but keeps looking down the angle it is holding");
+    }
+  }
+}
+
 static void test_locomotion_never_frame_rate_crouch_spam() {
   std::printf("locomotion: crouch taps at a hand's rate, never at frame rate\n");
   Locomotion loc(persona_w_keyer(), 33);
@@ -1255,6 +1337,8 @@ int main() {
   test_motor_runs_dry_and_reloads();
   test_motor_tops_up_before_being_caught_dry();
   test_locomotion_strafes_in_a_fight_not_on_a_metronome();
+  test_gaze_follows_travel_out_of_combat();
+  test_brain_decision_faces_travel();
   test_locomotion_never_frame_rate_crouch_spam();
   test_locomotion_braces_on_a_hard_fall();
   test_locomotion_jump_cadence_is_human();
