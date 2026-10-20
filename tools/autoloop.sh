@@ -85,6 +85,8 @@ if [[ -f "$BENCH" ]]; then
   contact=$(grep -oP 'time in contact: \K[0-9.]+' "$BENCH" | head -1)
   buildhz=$(grep -oP 'building: \K[0-9.]+' "$BENCH" | head -1)
   edits=$(grep -oP 'edits \K[0-9]+' "$BENCH" | head -1)
+  lootdec=$(grep -oP 'loot: \K[0-9]+' "$BENCH" | head -1)
+  lootorigin=$(grep -oP 'walked-at-origin \K[0-9]+' "$BENCH" | head -1)
 
   check() { # name value min max
     local name="$1" v="$2" lo="$3" hi="$4"
@@ -105,6 +107,18 @@ if [[ -f "$BENCH" ]]; then
     FAILED=1
   else
     report "  piece edits: $edits (ok)"
+  fi
+  if [[ -z "$lootdec" || "$lootdec" -eq 0 ]]; then
+    report "  loot decisions: MISSING or 0 (bots never loot)"
+    FAILED=1
+  else
+    report "  loot decisions: $lootdec (ok)"
+  fi
+  if [[ -n "$lootorigin" && "$lootorigin" -gt 0 ]]; then
+    report "  loot with no destination: $lootorigin (move_to at the origin bug)"
+    FAILED=1
+  else
+    report "  loot with no destination: 0 (ok)"
   fi
   if [[ -n "$repertoire" && "$repertoire" -lt $((LIVES * 3 / 4)) ]]; then
     report "  repertoire: only $repertoire/$LIVES bots use 4+ actions: TOO NARROW"

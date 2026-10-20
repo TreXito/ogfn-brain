@@ -17,7 +17,7 @@ No cmake, no network, no gtest needed. g++ 15 and make are enough.
 
 ## What "human" means here, mechanically
 
-Seven layers, each one a place where a naive bot gives itself away:
+Eight layers, each one a place where a naive bot gives itself away:
 
 1. **Perception** (`perception.cpp`): FOV cone, range limit, occlusion, no
    wallhack, and a 4 second memory after losing sight. Lock-on takes ~0.35s.
@@ -40,7 +40,12 @@ Seven layers, each one a place where a naive bot gives itself away:
    an irregular reversal cadence, a favourite lead shoulder held all match,
    crouch taps rate-limited to a hand (~4Hz max) plus a hold-cover peek cycle,
    jumping only to scramble or bail, and no steering at all during a hard fall.
-7. **Building** (`building.cpp`): plans are sequences, not intentions. Losing a
+7. **Loot valuation** (`loot.cpp`): pickups are objects, not a count. Worth is a
+   function of what the bot already carries (a big pot at 0 shield is the best
+   thing on the floor, the same pot at 100 shield is clutter), distance on a steep
+   curve, and how long the circle gives you. Two bots with identical inventories
+   disagree because their personas weight it differently.
+8. **Building** (`building.cpp`): plans are sequences, not intentions. Losing a
    trade boxes up (three walls, an edited window, closing wall, roof), a healthy
    push ramps with a wall between each ramp, and a peek is a wall plus a window.
    Inputs run at the bot's own hand rate, inputs are occasionally dropped, and a
@@ -67,17 +72,16 @@ tools/autoloop.sh --engine "..."  # also invoke an agent CLI with the brief
 
 1. **Squad and teammate behaviour.** Everything here is a solo bot. Add pack
    logic: shared target calling, revive intent, not stacking on one another.
-2. **Loot as a decision, not a counter.** `loot_within_30m` is an int. Real loot
-   choice is item valuation: shield over ammo over a gun you already have.
-3. **Interpolation tuning against real matches.** Record a human playing, compare
+2. **Interpolation tuning against real matches.** Record a human playing, compare
    reaction and trigger telemetry against `bench`, and move the constants.
-4. **Weapon feel per class.** One `WeaponProfile` now exists (mag + reload), but
+3. **Weapon feel per class.** One `WeaponProfile` now exists (mag + reload), but
    shotgun, AR and sniper still share one trigger discipline curve.
-5. **Build failure recovery.** The builder plans; it does not notice when a piece
+4. **Build failure recovery.** The builder plans; it does not notice when a piece
    is refused (no resource, blocked cell) and re-plan around it.
 
-Done: movement model (strafe, peek, crouch, fall bracing), the magazine, and
-building as a fight (box up, covered ramp push, window edits).
+Done: movement model (strafe, peek, crouch, fall bracing), the magazine,
+building as a fight (box up, covered ramp push, window edits), and loot
+valuation.
 
 ## Integration contract
 
@@ -91,6 +95,8 @@ MoveOutput mv = loco.update(dt, yaw, yaw_to_target, dist, d.action == ActionKind
                             m.firing, motor.reloading(), health_frac, move_state);
 BuildInput bi = builder.update(dt, d.action == ActionKind::Build, taking_fire,
                                health_frac, yaw_to_threat, height_available);
+// Loot and ThirdParty read from the world snapshot: w.loot (samples, not a count),
+// w.inventory, w.fight_x/y. A Loot decision walks to brain.loot_choice().pos.
 ```
 
 `Observation` is ground truth and the bot is only allowed to see what

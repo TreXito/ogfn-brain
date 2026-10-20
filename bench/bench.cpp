@@ -50,6 +50,14 @@ struct Stats {
   int build_edits = 0;
   int boxes = 0;
   BuildGoal last_goal = BuildGoal::None;
+  // Loot telemetry: a bot that never loots is not playing the game, one that loots
+  // constantly never fights, and one whose Loot decisions have nowhere to go is the
+  // (0,0,0) bug class.
+  int loot_decisions = 0;
+  int loot_no_target = 0;
+  int loot_walked_to_origin = 0;
+  float loot_worth_sum = 0.f;
+  int loot_kinds[13] = {0};
   bool last_crouch = false;
   std::vector<float> burst_lengths;
 };
@@ -76,6 +84,37 @@ WorldSnapshot scripted_world(double t, uint64_t life) {
   // Loot and enemies come in waves.
   w.loot_within_30m = static_cast<int>(3.f + 3.f * std::sin(t / 11.0));
   if (w.loot_within_30m < 0) w.loot_within_30m = 0;
+  // Real pickups, because a count cannot tell a big pot from an ammo box and the
+  // decision is made on the objects. Positions ride the same slow wave as the
+  // count so the bench stays repeatable.
+  w.loot.clear();
+  for (int li = 0; li < w.loot_within_30m; ++li) {
+    LootSample ls;
+    ls.id = 900 + li + (int)(life % 7) * 10;
+    const float ang = static_cast<float>(li) * 2.1f + static_cast<float>(t) * 0.05f;
+    const float rad = 6.f + 5.f * static_cast<float>(li);
+    ls.pos = Vec3(std::cos(ang) * rad, std::sin(ang) * rad, 0.f);
+    // A rotating mix of classes so every bot meets guns, heals and clutter.
+    switch ((li + (int)(life % 5)) % 6) {
+      case 0: ls.cls = ItemClass::ShieldBig; break;
+      case 1: ls.cls = ItemClass::Ammo; ls.count = 30; break;
+      case 2: ls.cls = ItemClass::Bandage; ls.count = 5; break;
+      case 3: ls.cls = ItemClass::Shotgun; break;
+      case 4: ls.cls = ItemClass::ShieldPotion; break;
+      default: ls.cls = ItemClass::Materials; ls.count = 40; break;
+    }
+    w.loot.push_back(ls);
+  }
+  // Inventory evolves so looting is a real decision, not a constant. Shield cycles
+  // between fights; the gun situation is fixed per life.
+  w.inventory.shield = static_cast<int>(clampf(60.f * static_cast<float>(std::sin(t / 9.0)) + 40.f, 0.f, 100.f));
+  w.inventory.big_shields = (static_cast<int>(t) / 30) % 3;
+  w.inventory.small_shields = (static_cast<int>(t) / 20) % 4;
+  w.inventory.weapon_tier = (life % 3 == 0) ? 0 : 2;
+  w.inventory.has_shotgun = (life % 2) == 0;
+  w.inventory.ammo = 40 + static_cast<int>(t) % 60;
+  w.fight_x = static_cast<float>(30.0 * std::sin(t / 13.0));
+  w.fight_y = static_cast<float>(30.0 * std::cos(t / 17.0));
   w.enemies_within_30m = static_cast<int>(2.f + 2.f * std::sin(t / 7.0));
   if (w.enemies_within_30m < 0) w.enemies_within_30m = 0;
   w.enemies_currently_fighting_each_other = (std::fmod(t, 17.0) < 4.0) ? 2 : 0;
@@ -187,6 +226,21 @@ Stats run_life(uint64_t seed, double minutes) {
     const bool taking_fire = w.target_is_visible && w.self_health < 70.f;
     const BuildInput bi = builder.update(dt, d.action == ActionKind::Build, taking_fire,
                                          health_frac, 0.f, true);
+    // Loot: did the decision carry a destination, and what did it pick?
+    if (d.action == ActionKind::Loot && d.reason == "plan") {
+      ++s.loot_decisions;
+      const LootChoice& lc = brain.loot_choice();
+      if (lc.want) {
+        s.loot_worth_sum += lc.worth;
+        ++s.loot_kinds[static_cast<int>(lc.cls) % 13];
+      } else {
+        ++s.loot_no_target;
+      }
+      // The origin is a legitimate destination only if the circle happens to be
+      // there; in this scenario the circle moves, so (0,0) means the intent was
+      // never filled in.
+      if (!lc.want && d.move_to.x == 0.f && d.move_to.y == 0.f) ++s.loot_walked_to_origin;
+    }
     if (bi.piece != PieceKind::None) ++s.build_pieces;
     if (bi.edit) ++s.build_edits;
     if (builder.goal() == BuildGoal::BoxUp && s.last_goal != BuildGoal::BoxUp) ++s.boxes;
@@ -241,6 +295,11 @@ int main(int argc, char** argv) {
     total.jumps += s.jumps;
     total.reloads += s.reloads;
     total.dry_ticks += s.dry_ticks;
+    total.loot_decisions += s.loot_decisions;
+    total.loot_no_target += s.loot_no_target;
+    total.loot_walked_to_origin += s.loot_walked_to_origin;
+    total.loot_worth_sum += s.loot_worth_sum;
+    for (int k = 0; k < 13; ++k) total.loot_kinds[k] += s.loot_kinds[k];
     total.build_pieces += s.build_pieces;
     total.build_edits += s.build_edits;
     total.boxes += s.boxes;
@@ -275,6 +334,23 @@ int main(int argc, char** argv) {
               static_cast<float>(total.build_inputs) / (denom / 60.f));
   std::printf("time in contact: %.1f%% of life\n",
               100.f * total.time_hurt / (total.time_hurt + total.time_safe));
+  {
+    const int denom_dec = (std::max)(1, total.loot_decisions);
+    std::printf("loot: %d decisions  %.0f%% had a target  mean worth %.2f  "
+                "no-target %d  walked-at-origin %d\n",
+                total.loot_decisions,
+                100.f * static_cast<float>(total.loot_decisions - total.loot_no_target) /
+                    static_cast<float>(denom_dec),
+                static_cast<float>(total.loot_worth_sum) / static_cast<float>(denom_dec),
+                total.loot_no_target, total.loot_walked_to_origin);
+    std::string kinds;
+    for (int k = 0; k < 13; ++k)
+      if (total.loot_kinds[k] > 0) {
+        kinds += std::string(to_string(static_cast<ItemClass>(k))) + "=" +
+                 std::to_string(total.loot_kinds[k]) + " ";
+      }
+    std::printf("loot mix: %s\n", kinds.c_str());
+  }
   std::printf("building: %.2f pieces/s per bot  edits %d  boxes %.2f/min\n",
               static_cast<float>(total.build_pieces) / (denom / 60.f),
               total.build_edits,
@@ -349,6 +425,17 @@ int main(int argc, char** argv) {
   if (build_hz < 0.02f || build_hz > 2.f) {
     std::printf("\nFAIL building at %.2f pieces/s per bot (want 0.02..2: either no\n"
                 "building or turbo-building)\n", build_hz);
+    ++failures;
+  }
+  // Loot: decisions must exist, mostly have somewhere to go, and never point at the
+  // world origin (the (0,0,0) intent bug).
+  if (total.loot_decisions == 0) {
+    std::printf("\nFAIL bots never decide to loot\n");
+    ++failures;
+  }
+  if (total.loot_walked_to_origin > 0) {
+    std::printf("\nFAIL %d loot decisions carried no destination (move_to at the origin)\n",
+                total.loot_walked_to_origin);
     ++failures;
   }
   if (total.build_edits == 0) {

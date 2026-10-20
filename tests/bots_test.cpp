@@ -621,6 +621,194 @@ static void test_building_goal_selection() {
   }
 }
 
+static void test_loot_classification() {
+  std::printf("loot: item names classify correctly\n");
+  // The engine hands over asset paths, so these are real 3.5-era shapes.
+  CHECK(classify_item("/Game/Athena/Items/Consumables/Shields/Athena_Shield_Potion") ==
+            ItemClass::ShieldBig,
+        "big shield potion");
+  CHECK(classify_item("/Game/Athena/Items/Consumables/Shields/Athena_Small_Shield_Potion") ==
+            ItemClass::ShieldPotion,
+        "small shield is not confused with the big one (substring order matters)");
+  CHECK(classify_item("/Game/Weapons/Shotgun/Athena_Shotgun_Pump") == ItemClass::Shotgun,
+        "shotgun, not generic AR");
+  CHECK(classify_item("/Game/Weapons/Sniper/Athena_Sniper_Bolt") == ItemClass::Sniper, "sniper");
+  CHECK(classify_item("/Game/Weapons/Rifle/Athena_Assault_Rifle") == ItemClass::AssaultRifle,
+        "assault rifle");
+  CHECK(classify_item("Athena_Medkit") == ItemClass::Medkit, "medkit");
+  CHECK(classify_item("Athena_Bandage") == ItemClass::Bandage, "bandage");
+  CHECK(classify_item("Ammo_Medium") == ItemClass::Ammo, "ammo");
+  CHECK(classify_item("Wood_Resource") == ItemClass::Materials, "materials");
+  CHECK(classify_item("Something_Weird") == ItemClass::Unknown, "unknown stays unknown");
+}
+
+static void test_loot_valuation_prefers_what_you_lack() {
+  std::printf("loot: worth depends on what the bot already has\n");
+  LootValuer v(persona_rotator(), 61);
+  const Vec3 self{0.f, 0.f, 0.f};
+
+  Inventory empty;
+  empty.shield = 0;
+  Inventory loaded;
+  loaded.shield = 100;
+  loaded.big_shields = 3;
+
+  const LootSample big{1, Vec3(10.f, 0.f, 0.f), ItemClass::ShieldBig, 1};
+  const float w_empty = v.worth_of(LootSample{7, Vec3(10.f, 0.f, 0.f), ItemClass::ShieldBig, 1},
+                                  empty, 10.f, 60.f, false);
+  const float w_loaded = v.worth_of(LootSample{7, Vec3(10.f, 0.f, 0.f), ItemClass::ShieldBig, 1},
+                                    loaded, 10.f, 60.f, false);
+  CHECK(w_empty > w_loaded * 3.f, "a big pot means far more with no shield than at full shield");
+
+  // Shields beat bandages when shields are down: that is the S3 economy.
+  const float w_bandage = v.worth_of(LootSample{8, Vec3(10.f, 0.f, 0.f), ItemClass::Bandage, 5},
+                                     empty, 10.f, 60.f, false);
+  CHECK(w_empty > w_bandage, "shields outrank bandages when the shield bar is empty");
+
+  // A second AR is not worth a walk when you already have one.
+  Inventory armed;
+  armed.weapon_tier = 3;
+  const float w_ar_armed = v.worth_of(LootSample{9, Vec3(10.f, 0.f, 0.f), ItemClass::AssaultRifle, 1},
+                                      armed, 10.f, 60.f, false);
+  Inventory unarmed;
+  const float w_ar_unarmed = v.worth_of(LootSample{9, Vec3(10.f, 0.f, 0.f), ItemClass::AssaultRifle, 1},
+                                        unarmed, 10.f, 60.f, false);
+  CHECK(w_ar_unarmed > w_ar_armed * 3.f, "a gun matters when you have none, not when you do");
+  (void)big;
+  (void)self;
+}
+
+static void test_loot_distance_and_clock() {
+  std::printf("loot: distance and the closing circle both cost worth\n");
+  LootValuer v(persona_rotator(), 62);
+  Inventory inv;
+  inv.shield = 0;
+  const LootSample pot{5, Vec3(0.f, 0.f, 0.f), ItemClass::ShieldBig, 1};
+
+  const float near = v.worth_of(pot, inv, 3.f, 60.f, false);
+  const float mid = v.worth_of(pot, inv, 15.f, 60.f, false);
+  const float far = v.worth_of(pot, inv, 40.f, 60.f, false);
+  CHECK(near > mid && mid > far, "further loot is worth less");
+  CHECK(far * 4.f < near, "the cost curve is steep, not linear (no vacuuming the map)");
+
+  const float lots_of_time = v.worth_of(pot, inv, 10.f, 60.f, false);
+  const float no_time = v.worth_of(pot, inv, 10.f, 4.f, false);
+  CHECK(lots_of_time > no_time * 2.f, "with the circle closing, the same pot is barely worth it");
+
+  const float calm = v.worth_of(pot, inv, 10.f, 60.f, false);
+  const float fighting = v.worth_of(pot, inv, 10.f, 60.f, true);
+  CHECK(calm > fighting * 3.f, "looting mid-fight is nearly always wrong");
+}
+
+static void test_loot_choice_picks_the_best_not_the_nearest() {
+  std::printf("loot: walks to what is worth it, not to the closest thing\n");
+  LootValuer v(persona_rotator(), 63);
+  Inventory inv;
+  inv.shield = 0;
+  const std::vector<LootSample> samples = {
+      {1, Vec3(3.f, 0.f, 0.f), ItemClass::Ammo, 30},
+      {2, Vec3(8.f, 0.f, 0.f), ItemClass::ShieldBig, 1},
+      {3, Vec3(5.f, 0.f, 0.f), ItemClass::Bandage, 5},
+  };
+  const LootChoice c = v.choose(samples, inv, Vec3(0.f, 0.f, 0.f), 60.f, false);
+  CHECK(c.want, "there is something worth taking");
+  CHECK(c.pickup_id == 2, "the big pot at 8m beats the ammo at 3m");
+  CHECK(c.cls == ItemClass::ShieldBig, "and the choice reports what it is");
+
+  // With everything topped off, clutter is not worth a detour.
+  Inventory full;
+  full.shield = 100;
+  full.big_shields = 3;
+  full.small_shields = 5;
+  full.weapon_tier = 4;
+  full.ammo = 500;
+  full.medkits = 3;
+  full.bandages = 10;
+  const std::vector<LootSample> junk = {
+      {4, Vec3(6.f, 0.f, 0.f), ItemClass::Ammo, 10},
+      {5, Vec3(9.f, 0.f, 0.f), ItemClass::Bandage, 5},
+  };
+  const LootChoice none = v.choose(junk, full, Vec3(0.f, 0.f, 0.f), 60.f, false);
+  CHECK(!none.want, "a fully kitted bot does not detour for clutter");
+}
+
+static void test_loot_preferences_differ_between_bots() {
+  std::printf("loot: two bots with the same inventory still disagree\n");
+  // Greedy vs cautious on the same floor.
+  Persona greedy = persona_w_keyer();
+  greedy.greed = 1.f;
+  greedy.caution = 0.f;
+  Persona careful = persona_camper();
+  careful.greed = 0.05f;
+  careful.caution = 1.f;
+  LootValuer vg(greedy, 64), vc(careful, 65);
+  Inventory inv;
+  inv.shield = 20;
+  const LootSample far_pot{6, Vec3(38.f, 0.f, 0.f), ItemClass::ShieldBig, 1};
+  const float wg = vg.worth_of(far_pot, inv, 38.f, 60.f, false);
+  const float wc = vc.worth_of(far_pot, inv, 38.f, 60.f, false);
+  CHECK(wg > wc, "the greedy bot values the same far pot more than the cautious one");
+
+  // A builder values materials far above a bot that never builds.
+  Persona builder = persona_rotator();
+  builder.build_speed = 1.f;
+  Persona nonbuilder = persona_camper();
+  nonbuilder.build_speed = 0.05f;
+  LootValuer vb(builder, 66), vn(nonbuilder, 67);
+  const LootSample mats{7, Vec3(10.f, 0.f, 0.f), ItemClass::Materials, 100};
+  CHECK(vb.worth_of(mats, Inventory{}, 10.f, 60.f, false) >
+            vn.worth_of(mats, Inventory{}, 10.f, 60.f, false),
+        "a fast builder cares about materials more than a camper does");
+}
+
+static void test_brain_loot_intent_has_a_destination() {
+  std::printf("brain: Loot and ThirdParty produce a real destination\n");
+  {
+    Brain b(persona_rotator(), 68);
+    WorldSnapshot w = peaceful_world();
+    w.circle_next_center_x = 0.f;
+    w.circle_next_center_y = 0.f;
+    w.loot_within_30m = 2;
+    w.inventory.shield = 0;
+    w.loot = {{11, Vec3(8.f, 0.f, 0.f), ItemClass::ShieldBig, 1},
+              {12, Vec3(2.f, 0.f, 0.f), ItemClass::Ammo, 30}};
+    b.prime_action(ActionKind::Loot, w.time);
+    const Decision d = b.think(w);
+    CHECK(d.action == ActionKind::Loot || contains(d.scores, "Loot"), "looting is on the table");
+    if (d.action == ActionKind::Loot) {
+      CHECK(d.move_to.x > 4.f, "walks to the big pot, not the ammo at 2m");
+      CHECK(b.loot_choice().want, "and reports a real choice");
+    }
+  }
+  {
+    // ThirdParty used to fall through to `default` and return (0,0,0), so the
+    // action did literally nothing. It must now walk at the fight.
+    Brain b(persona_third_party(), 69);
+    WorldSnapshot w = peaceful_world();
+    w.enemies_currently_fighting_each_other = 2;
+    w.fight_x = 120.f;
+    w.fight_y = -40.f;
+    b.prime_action(ActionKind::ThirdParty, w.time);
+    const Decision d = b.think(w);
+    if (d.action == ActionKind::ThirdParty)
+      CHECK(d.move_to.x == 120.f && d.move_to.y == -40.f,
+            "third-partying walks at the fight, not the centre of the map");
+  }
+  {
+    // HoldAngle legitimately means "stay here", so its move_to is self, never the
+    // origin, which is what a missing case would have produced.
+    Brain b(persona_camper(), 70);
+    WorldSnapshot w = peaceful_world();
+    w.self_pos = Vec3(700.f, -250.f, 0.f);
+    w.enemies_within_30m = 2;
+    b.prime_action(ActionKind::HoldAngle, w.time);
+    const Decision d = b.think(w);
+    if (d.action == ActionKind::HoldAngle)
+      CHECK(d.move_to.x == 700.f && d.move_to.y == -250.f,
+            "holding an angle means holding position, not walking to the origin");
+  }
+}
+
 static std::string traced_run(uint64_t seed, int ticks) {
   Brain b(persona_rotator(), seed);
   std::string trace;
@@ -725,6 +913,12 @@ int main() {
   test_building_boxes_up_under_fire();
   test_building_uses_the_box_instead_of_rebuilding_it();
   test_build_grid_places_pieces_where_a_player_would();
+  test_loot_classification();
+  test_loot_valuation_prefers_what_you_lack();
+  test_loot_distance_and_clock();
+  test_loot_choice_picks_the_best_not_the_nearest();
+  test_loot_preferences_differ_between_bots();
+  test_brain_loot_intent_has_a_destination();
   test_building_is_not_a_macro();
   test_building_goal_selection();
   test_population_spread();
