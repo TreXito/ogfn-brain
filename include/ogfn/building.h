@@ -34,6 +34,28 @@ enum class BuildGoal {
   PeekWindow,
 };
 
+// Where a piece goes in world space. This lives in the brain rather than the
+// engine adapter for one reason: grid alignment is easy to get subtly wrong and
+// almost invisible in a log. A wall half a cell off looks fine in a screenshot and
+// acts as a gap in a box, so the arithmetic is pinned by a test instead.
+//
+// Meters here; the adapter converts to uu at the boundary and is the only code
+// that knows about uu.
+struct BuildPiece {
+  Vec3 pos;             // centre of the piece
+  float yaw_deg = 0.f;  // the piece's own orientation
+  bool valid = false;
+};
+
+struct BuildGrid {
+  float cell = 5.12f;         // meters per cell (512 uu)
+  float wall_height = 3.84f;  // meters per wall tier (384 uu)
+
+  // Piece for a player standing at `self` (feet) facing `yaw_deg`, for `step` of a
+  // sequence: a box fans around the player instead of stacking in one plane.
+  BuildPiece place(PieceKind kind, const Vec3& self, float yaw_deg, int step) const;
+};
+
 // The building tell. Three things make a bot's building obvious, and this layer is
 // built around each:
 //   1. Speed. Turbo-building at input rate is machine behaviour. Humans place at

@@ -535,6 +535,48 @@ static void test_building_is_not_a_macro() {
   }
 }
 
+static void test_build_grid_places_pieces_where_a_player_would() {
+  std::printf("build grid: pieces land on the cell edges, boxes close\n");
+  BuildGrid g;
+  const Vec3 self{100.f, 200.f, 0.f};
+  const float yaw = 0.f;  // facing +x
+
+  const BuildPiece w0 = g.place(PieceKind::Wall, self, yaw, 0);
+  CHECK(w0.valid, "a wall is placeable");
+  CHECK(std::fabs(w0.pos.x - (self.x + g.cell * 0.5f)) < 1e-3f, "first wall goes half a cell ahead");
+  CHECK(std::fabs(w0.pos.y - self.y) < 1e-3f, "and stays on the player's line");
+  CHECK(std::fabs(w0.pos.z - self.z) < 1e-3f, "at the player's own height");
+
+  // Four walls of a box: each one must be half a cell from the player along a
+  // different axis, so the box actually closes.
+  std::vector<Vec3> corners;
+  for (int step = 0; step < 4; ++step) {
+    const BuildPiece w = g.place(PieceKind::Wall, self, yaw, step);
+    CHECK(std::fabs(length(w.pos - self) - g.cell * 0.5f) < 1e-3f,
+          "every box wall is the same distance from the player");
+    corners.push_back(w.pos);
+  }
+  int distinct = 0;
+  for (size_t i = 0; i < corners.size(); ++i) {
+    bool novel = true;
+    for (size_t j = 0; j < i; ++j)
+      if (length(corners[i] - corners[j]) < 1e-2f) novel = false;
+    if (novel) ++distinct;
+  }
+  CHECK(distinct == 4, "four walls occupy four different sides, not one plane");
+
+  const BuildPiece roof = g.place(PieceKind::Floor, self, yaw, 0);
+  CHECK(roof.valid && std::fabs(roof.pos.z - (self.z + g.wall_height)) < 1e-3f,
+        "the roof sits one wall tier above the player");
+
+  const BuildPiece ramp = g.place(PieceKind::Ramp, self, yaw, 0);
+  CHECK(ramp.valid && std::fabs(ramp.pos.x - (self.x + g.cell)) < 1e-3f,
+        "a ramp occupies the cell in front, not the player's own cell");
+  CHECK(std::fabs(ramp.yaw_deg - yaw) < 1e-3f, "a ramp points where the player faces");
+
+  CHECK(!g.place(PieceKind::None, self, yaw, 0).valid, "no piece for None");
+}
+
 static void test_building_uses_the_box_instead_of_rebuilding_it() {
   std::printf("building: fights from the box, does not rebuild it every second\n");
   Builder b(persona_w_keyer(), 57);
@@ -682,6 +724,7 @@ int main() {
   test_locomotion_jump_cadence_is_human();
   test_building_boxes_up_under_fire();
   test_building_uses_the_box_instead_of_rebuilding_it();
+  test_build_grid_places_pieces_where_a_player_would();
   test_building_is_not_a_macro();
   test_building_goal_selection();
   test_population_spread();

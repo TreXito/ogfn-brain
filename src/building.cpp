@@ -26,6 +26,41 @@ constexpr double kBoxCooldown = 5.0;
 constexpr double kPeekCooldown = 1.6;
 }  // namespace
 
+BuildPiece BuildGrid::place(PieceKind kind, const Vec3& self, float yaw_deg, int step) const {
+  BuildPiece out;
+  if (kind == PieceKind::None) return out;
+
+  // A box is walked around one quarter turn at a time; a ramp line all goes the
+  // same way, which is why only Wall fans with the step.
+  const float yaw = (kind == PieceKind::Wall) ? wrap180(yaw_deg + 90.f * static_cast<float>(step))
+                                              : yaw_deg;
+  const Vec3 fwd = yaw_to_dir(yaw);
+
+  switch (kind) {
+    case PieceKind::Wall:
+      // Walls sit one half-cell out from the player's feet, centred on the edge of
+      // the cell they occupy.
+      out.pos = Vec3(self.x + fwd.x * cell * 0.5f, self.y + fwd.y * cell * 0.5f, self.z);
+      break;
+    case PieceKind::Floor:
+      // A roof is a cell above the head, aligned to the player's own cell.
+      out.pos = Vec3(self.x, self.y, self.z + wall_height);
+      break;
+    case PieceKind::Ramp:
+      // Ramps occupy the cell in front and climb one wall tier over one cell.
+      out.pos = Vec3(self.x + fwd.x * cell, self.y + fwd.y * cell, self.z);
+      break;
+    case PieceKind::Cone:
+      out.pos = Vec3(self.x, self.y, self.z + wall_height);
+      break;
+    case PieceKind::None:
+      return out;
+  }
+  out.yaw_deg = yaw;
+  out.valid = true;
+  return out;
+}
+
 void Builder::start_goal(BuildGoal g, float now) {
   goal_ = g;
   goal_started_ = now;
