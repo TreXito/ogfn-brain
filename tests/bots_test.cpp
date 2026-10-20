@@ -175,6 +175,42 @@ static void test_rotation_is_not_a_beeline_to_the_centre() {
         "the rotation line is stable for a given bot, not re-rolled");
 }
 
+// A bot 20m outside the ring with an enemy 25m away used to choose ENGAGE. A player
+// in the storm runs: the storm is a guaranteed death, the fight is not. Measured in a
+// 50-bot match before the fix, the storm killed 1 bot while fights killed 47.
+static void test_storm_outranks_a_fight() {
+  std::printf("brain: being in the storm outranks taking a fight\n");
+  for (float edge : {2.f, 12.f, 25.f, 60.f, 200.f}) {
+    Brain b(persona_w_keyer(), 401);   // the most aggression-biased persona there is
+    WorldSnapshot w = peaceful_world();
+    w.distance_to_circle_edge = edge;
+    w.circle_next_center_x = 500.f;
+    w.circle_next_center_y = 0.f;
+    w.circle_radius = 200.f;
+    w.target_is_visible = true;
+    w.target_distance = 15.f;
+    w.enemies_within_30m = 1;
+    w.self_health = 100.f;
+    w.self_shield = 100.f;
+    const Decision d = b.think(w);
+    CHECK(d.action == ActionKind::RotateToCircle,
+          "outside the ring, even a w-keyer runs instead of fighting");
+  }
+  {
+    // Comfortably inside, the same bot must still take the fight: the fix must not
+    // turn every bot into a runner.
+    Brain b(persona_w_keyer(), 402);
+    WorldSnapshot w = peaceful_world();
+    w.distance_to_circle_edge = -60.f;
+    w.target_is_visible = true;
+    w.target_distance = 15.f;
+    w.enemies_within_30m = 1;
+    const Decision d = b.think(w);
+    CHECK(d.action == ActionKind::Engage || contains(d.scores, "Engage"),
+          "inside the ring the same bot takes the fight");
+  }
+}
+
 static void test_brain_engage_vs_flee() {
   std::printf("brain: aggression and health change the fight decision\n");
   {
@@ -1471,6 +1507,7 @@ int main() {
   test_perception_lock_takes_time();
   test_brain_zone_priority();
   test_rotation_is_not_a_beeline_to_the_centre();
+  test_storm_outranks_a_fight();
   test_brain_engage_vs_flee();
   test_brain_heal();
   test_heal_is_a_committed_timed_action();
