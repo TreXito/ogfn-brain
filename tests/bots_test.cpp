@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -742,6 +743,31 @@ static void test_locomotion_never_frame_rate_crouch_spam() {
   CHECK(transitions <= 90, "crouch changes are rate limited to human tapping");
 }
 
+// Speed was a state machine: four constants with a 64% modal value across a match.
+// A human's stick input drifts, and they slow down to change direction.
+static void test_locomotion_speed_is_not_a_state_machine() {
+  std::printf("locomotion: speed varies continuously, not in four steps\n");
+  Locomotion loc(persona_rotator(), 111);
+  MoveState st;
+  std::map<int, int> buckets;
+  float prev = -1.f;   // not 1.0: the first tick legitimately enters the engaged speed
+  int big_jumps = 0;
+  for (int i = 0; i < 60 * 60; ++i) {
+    // Engaged and firing: the case where the old code returned exactly 0.72 every tick.
+    const MoveOutput o = loc.update(1.f / 60.f, 0.f, 20.f, 25.f, true, true, false, 0.8f, st,
+                                    0.f, false);
+    buckets[static_cast<int>(std::lround(o.speed_scale * 100.f))]++;
+    if (prev >= 0.f && std::fabs(o.speed_scale - prev) > 0.25f) ++big_jumps;
+    prev = o.speed_scale;
+  }
+  CHECK(buckets.size() > 15, "speed takes many distinct values, not a handful");
+  int modal = 0;
+  for (const auto& kv : buckets) modal = std::max(modal, kv.second);
+  const float modal_frac = static_cast<float>(modal) / (60.f * 60.f);
+  CHECK(modal_frac < 0.6f, "no single speed dominates the match");
+  CHECK(big_jumps == 0, "and it changes smoothly rather than jumping between states");
+}
+
 static void test_locomotion_braces_on_a_hard_fall() {
   std::printf("locomotion: cannot steer mid-fall, recovers on landing\n");
   Locomotion loc(persona_camper(), 34);
@@ -1425,6 +1451,7 @@ int main() {
   test_gaze_follows_travel_out_of_combat();
   test_brain_decision_faces_travel();
   test_locomotion_never_frame_rate_crouch_spam();
+  test_locomotion_speed_is_not_a_state_machine();
   test_locomotion_braces_on_a_hard_fall();
   test_locomotion_jump_cadence_is_human();
   test_building_boxes_up_under_fire();
