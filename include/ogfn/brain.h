@@ -133,6 +133,9 @@ class Brain {
   // the engine can hold the bot in it and the bench can measure heal uptime.
   bool healing() const { return heal_left_ > 0.f; }
   int heal_item() const { return heal_item_; }
+  // Seconds left on the committed heal, so the engine can animate and count against
+  // the same number the brain decided instead of inventing its own.
+  float heal_seconds_left() const { return heal_left_ > 0.f ? heal_left_ : 0.f; }
   const SquadBrain& squad() const { return squad_; }
   const SquadDirective& squad_directive() const { return squad_directive_; }
   // The view direction the movement layer asked for, if any. The engine blends the
