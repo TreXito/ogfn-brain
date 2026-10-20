@@ -91,8 +91,9 @@ class Brain {
   const Persona& persona() const { return persona_; }
   const LootValuer& loot_valuer() const { return loot_; }
 
-  // What the bot decided to walk to, for telemetry and tests. Cleared when the bot
-  // is not looting.
+  // What the bot decided to walk to. Persists across committed ticks (the valuation
+  // only re-runs on a plan beat), and is empty when the last Loot plan found
+  // nothing worth the walk.
   const LootChoice& loot_choice() const { return loot_choice_; }
   Perception& perception() { return perception_; }
   const Perception& perception() const { return perception_; }

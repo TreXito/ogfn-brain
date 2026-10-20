@@ -136,7 +136,10 @@ float Brain::score(ActionKind k, const WorldSnapshot& w) const {
 Decision Brain::make_intent(ActionKind a, const WorldSnapshot& w) {
   Decision d;
   d.action = a;
-  loot_choice_ = LootChoice{};
+  // NOTE: loot_choice_ is NOT cleared here. A committed tick re-runs make_intent every
+  // frame and does not re-run the valuation (the plan beat did), so clearing would
+  // erase the live choice one tick after it was made and every consumer would see
+  // "no choice" while the bot is visibly walking to the pot.
   switch (a) {
     case ActionKind::Engage:
       d.move_to = Vec3(w.circle_center_x, w.circle_center_y, 0.f);
