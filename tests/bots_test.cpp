@@ -216,6 +216,7 @@ static void test_brain_heal() {
   WorldSnapshot w = peaceful_world();
   w.self_shield = 0.f;
   w.shield_potions = 2;
+  w.small_shields = 2;   // the inventory the score now checks, not just a counter
   w.enemies_within_30m = 0;
   w.loot_within_30m = 0;
   const Decision d = b.think(w);
@@ -226,6 +227,89 @@ static void test_brain_heal() {
 // default (0,0,0). Committed ticks were fine, so live matches looked like an
 // intermittent movement bug: bots walked at the map origin on every plan beat.
 // Pin the intent on BOTH paths, not just the committed one.
+// Healing is a timed animation, not a click. A bot that decides Heal every tick and
+// is instantly full is not a player: a player commits to a 2-5s animation, is locked
+// out of everything else, and gets shot out of it.
+static void test_heal_is_a_committed_timed_action() {
+  std::printf("brain: healing commits to an item and a duration\n");
+  {
+    Brain b(persona_camper(), 301);
+    WorldSnapshot w = peaceful_world();
+    w.self_shield = 0.f;
+    w.small_shields = 3;
+    w.enemies_within_30m = 0;
+    w.loot_within_30m = 0;
+    const Decision d1 = b.think(w);
+    CHECK(d1.action == ActionKind::Heal, "starts a heal");
+    CHECK(b.healing(), "and is now committed to it");
+    CHECK(b.heal_item() == 1, "cheap shield first when only shields are missing");
+
+    // While the heal runs, every tick is the heal: no looting, no rotating.
+    w.time += 0.5;
+    const Decision d2 = b.think(w);
+    CHECK(d2.action == ActionKind::Heal && d2.reason == "healing",
+          "stays in the heal instead of re-deciding");
+    CHECK(d2.move_to.x == w.self_pos.x && d2.move_to.y == w.self_pos.y,
+          "a healing player stands still");
+    CHECK(d2.build_wall, "and heals behind cover");
+
+    // It ends when the shields are back up: while still hurt the bot correctly
+    // re-commits to another potion, so the heal only stops once there is nothing
+    // left to heal. That is a player chaining potions, not a stuck bot.
+    w.self_shield = 100.f;
+    for (int i = 0; i < 60 * 6; ++i) {
+      w.time += 1.0 / 60.0;
+      b.think(w);
+    }
+    CHECK(!b.healing(), "stops healing once the shield bar is full");
+  }
+  {
+    // Shot at close range mid-heal: a player drops it and fights.
+    Brain b(persona_camper(), 302);
+    WorldSnapshot w = peaceful_world();
+    w.self_shield = 0.f;
+    w.small_shields = 3;
+    w.enemies_within_30m = 0;
+    w.loot_within_30m = 0;
+    CHECK(b.think(w).action == ActionKind::Heal, "starts a heal");
+    // Now a threat appears right next to it.
+    w.target_is_visible = true;
+    w.target_distance = 12.f;
+    w.has_weapon = true;
+    w.time += 0.2;
+    const Decision d = b.think(w);
+    CHECK(d.action != ActionKind::Heal || d.reason != "healing",
+          "a close-range threat interrupts the heal");
+  }
+  {
+    // Health is more urgent than shields, and a medkit is for a real hole.
+    Brain b(persona_camper(), 303);
+    WorldSnapshot w = peaceful_world();
+    w.self_health = 30.f;
+    w.self_shield = 100.f;
+    w.medkits = 1;
+    w.bandages = 5;
+    w.enemies_within_30m = 0;
+    w.loot_within_30m = 0;
+    const Decision d = b.think(w);
+    if (d.action == ActionKind::Heal) {
+      CHECK(b.heal_item() == 3, "a medkit when health is the real problem");
+    }
+  }
+  {
+    // Nothing to heal with: no phantom heals.
+    Brain b(persona_camper(), 304);
+    WorldSnapshot w = peaceful_world();
+    w.self_shield = 0.f;
+    w.self_health = 40.f;
+    w.enemies_within_30m = 0;
+    w.loot_within_30m = 0;
+    const Decision d = b.think(w);
+    CHECK(d.action != ActionKind::Heal, "does not decide to heal with an empty bag");
+    CHECK(!b.healing(), "and commits to nothing");
+  }
+}
+
 static void test_plan_path_carries_the_intent() {
   std::printf("brain: plan ticks carry a real intent, not a default Decision\n");
   {
@@ -1325,6 +1409,7 @@ int main() {
   test_rotation_is_not_a_beeline_to_the_centre();
   test_brain_engage_vs_flee();
   test_brain_heal();
+  test_heal_is_a_committed_timed_action();
   test_plan_path_carries_the_intent();
   test_reaction_delay_blocks_instant_switch();
   test_motor_never_snap_aims();

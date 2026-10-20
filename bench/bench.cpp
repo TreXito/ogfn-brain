@@ -72,6 +72,7 @@ struct Stats {
   // check legitimately puts the view 70 degrees off travel for a second, and a mean
   // punishes that. What matters is that the bot is usually facing where it walks.
   std::vector<float> gaze_offs;
+  int heal_ticks = 0;
   bool last_crouch = false;
   std::vector<float> burst_lengths;
 };
@@ -127,6 +128,12 @@ WorldSnapshot scripted_world(double t, uint64_t life) {
   w.inventory.weapon_tier = (life % 3 == 0) ? 0 : 2;
   w.inventory.has_shotgun = (life % 2) == 0;
   w.inventory.ammo = 40 + static_cast<int>(t) % 60;
+  // Consumables for the committed heal: small shields on a cycle, so the bot has
+  // something to heal with and the animation actually runs.
+  w.small_shields = 1 + ((static_cast<int>(t) / 25) % 3);
+  w.big_shields = (static_cast<int>(t) / 40) % 2;
+  w.medkits = 1;
+  w.bandages = 3;
   w.fight_x = static_cast<float>(30.0 * std::sin(t / 13.0));
   w.fight_y = static_cast<float>(30.0 * std::cos(t / 17.0));
   w.enemies_within_30m = static_cast<int>(2.f + 2.f * std::sin(t / 7.0));
@@ -288,6 +295,8 @@ Stats run_life(uint64_t seed, double minutes, bool in_squad = false) {
     const bool taking_fire = w.target_is_visible && w.self_health < 70.f;
     const BuildInput bi = builder.update(dt, d.action == ActionKind::Build, taking_fire,
                                          health_frac_pre, 0.f, true);
+    if (d.action == ActionKind::Heal) ++s.heal_ticks;
+
     // Gaze alignment while travelling out of combat. Measured against the travel
     // direction the movement layer was given (travel_yaw), which is what the bot
     // decided to walk toward; d.move_to is the rotation TARGET (offset inside the
@@ -387,6 +396,7 @@ int main(int argc, char** argv) {
     total.spread_orders += s.spread_orders;
     total.help_calls += s.help_calls;
     all_gaze.insert(all_gaze.end(), s.gaze_offs.begin(), s.gaze_offs.end());
+    total.heal_ticks += s.heal_ticks;
     total.loot_decisions += s.loot_decisions;
     total.loot_no_target += s.loot_no_target;
     total.loot_walked_to_origin += s.loot_walked_to_origin;
@@ -430,6 +440,8 @@ int main(int argc, char** argv) {
     std::printf("gaze: view off travel p50=%.0f p90=%.0f deg while moving "
                 "(p50 wants <20: the bot faces where it walks)\n",
                 pct(all_gaze, 0.50f), pct(all_gaze, 0.90f));
+  std::printf("healing: %.1f%% of life spent healing (one committed animation at a time)\n",
+              100.f * static_cast<float>(total.heal_ticks) / denom);
   std::printf("squad: revives %d  focus calls %d  spread orders %d  help calls %d\n",
               total.revives, total.focus_calls, total.spread_orders, total.help_calls);
   {
@@ -552,6 +564,13 @@ int main(int argc, char** argv) {
                   "bot walks sideways staring at nothing)\n", gaze50);
       ++failures;
     }
+  }
+  // Healing: a bot that never heals is not playing the game; one that spends most of
+  // its life in an animation is being shot out of potions constantly.
+  const float heal_pct = 100.f * static_cast<float>(total.heal_ticks) / denom;
+  if (heal_pct < 1.f || heal_pct > 35.f) {
+    std::printf("\nFAIL healing sits at %.1f%% of life (want 1..35%%)\n", heal_pct);
+    ++failures;
   }
   if (total.loot_decisions == 0) {
     std::printf("\nFAIL bots never decide to loot\n");
