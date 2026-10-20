@@ -474,6 +474,44 @@ static void test_motor_leads_a_moving_target() {
   for (float l : lead_by_skill) CHECK(l < 6.f, "the lead is human-sized, not a prediction lock");
 }
 
+// A human flick across 80 degrees peaks at roughly 300-800 deg/s and settles in
+// 150-350ms. Too slow is a bot that cannot track; too fast or too accurate is an
+// aimbot. This is the exact feature a replay detector extracts.
+static void test_motor_flick_speed_is_human() {
+  std::printf("motor: flick speed and settle time sit in the human band\n");
+  std::vector<float> peaks, settles;
+  for (uint64_t seed = 500; seed < 516; ++seed) {
+    Rng seeder(seed);
+    Persona p = Persona::sample(seeder, 0.f);
+    Motor m(p, seed);
+    const Vec3 self{0.f, 0.f, 0.f};
+    const Vec3 target{20.f * std::cos(deg2rad(80.f)), 20.f * std::sin(deg2rad(80.f)), 0.f};
+    float yaw = 0.f, pitch = 0.f, peak = 0.f;
+    int settle = -1;
+    for (int i = 0; i < 180; ++i) {
+      const MotorOutput o = m.aim_at(self, yaw, pitch, target, false, 1.f / 60.f);
+      peak = std::max(peak, std::fabs(wrap180(o.yaw_deg - yaw)) * 60.f);
+      yaw = o.yaw_deg;
+      pitch = o.pitch_deg;
+      if (settle < 0 && m.aim_error_deg() < 5.f) settle = i;
+    }
+    peaks.push_back(peak);
+    settles.push_back(settle < 0 ? 9.f : static_cast<float>(settle) / 60.f);
+  }
+  auto q = [](std::vector<float> v, float f) {
+    std::sort(v.begin(), v.end());
+    return v[static_cast<size_t>(f * static_cast<float>(v.size() - 1))];
+  };
+  const float peak50 = q(peaks, 0.5f);
+  const float peak10 = q(peaks, 0.1f);
+  const float settle50 = q(settles, 0.5f);
+  const float settle90 = q(settles, 0.9f);
+  CHECK(peak10 > 250.f, "even a poor flick is fast enough to reach a target");
+  CHECK(peak50 < 900.f, "but nobody snaps the crosshair like a machine");
+  CHECK(settle50 > 0.10f, "a flick takes time, it is not instant");
+  CHECK(settle90 < 0.60f, "and it does land: not a bot that cannot aim");
+}
+
 // Vertical aim did not exist at all: pitch_deg was written nowhere, so every bot
 // tracked dead level for a whole match. Zero variance in pitch across a match is
 // the kind of thing a replay detector finds in one pass.
@@ -1445,6 +1483,7 @@ int main() {
   test_motor_damage_flinch();
   test_motor_leads_a_moving_target();
   test_motor_aims_vertically();
+  test_motor_flick_speed_is_human();
   test_motor_runs_dry_and_reloads();
   test_motor_tops_up_before_being_caught_dry();
   test_locomotion_strafes_in_a_fight_not_on_a_metronome();
