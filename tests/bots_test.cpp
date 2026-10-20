@@ -120,6 +120,60 @@ static void test_brain_zone_priority() {
         "rotates when outside the zone");
 }
 
+// A beeline to the ring centre is what every bot does when it has no idea where
+// anyone is. Real players enter at an offset and aim for a patch of ground inside
+// the ring, and each player's line is a habit rather than a fresh coin flip.
+static void test_rotation_is_not_a_beeline_to_the_centre() {
+  std::printf("brain: rotation aims inside the ring, off-centre, consistently\n");
+  struct Run { Vec3 first; float spread; bool in_ring; };
+  std::vector<Vec3> first_dests;
+  for (uint64_t seed = 200; seed < 216; ++seed) {
+    Brain b(persona_rotator(), seed);
+    WorldSnapshot w = peaceful_world();
+    w.distance_to_circle_edge = 60.f;   // well outside: forced rotation
+    w.circle_next_center_x = 1000.f;
+    w.circle_next_center_y = -500.f;
+    w.circle_radius = 300.f;
+    std::vector<Vec3> dests;
+    for (int i = 0; i < 60 * 20; ++i) {
+      w.time = i / 60.0;
+      const Decision d = b.think(w);
+      if (d.action == ActionKind::RotateToCircle) dests.push_back(d.move_to);
+    }
+    CHECK(!dests.empty(), "a bot outside the ring rotates");
+    if (dests.empty()) continue;
+    // Every destination is inside the ring.
+    for (const auto& p : dests) {
+      const float dx = p.x - 1000.f, dy = p.y + 500.f;
+      CHECK(std::sqrt(dx * dx + dy * dy) <= 300.f + 1.f, "rotation target is inside the ring");
+    }
+    // And it is not the centre: a beeline is the tell.
+    float off_min = 1e9f;
+    for (const auto& p : dests) {
+      const float dx = p.x - 1000.f, dy = p.y + 500.f;
+      off_min = std::min(off_min, std::sqrt(dx * dx + dy * dy));
+    }
+    CHECK(off_min > 2.f, "never aims at the exact centre of the ring");
+    first_dests.push_back(dests.front());
+  }
+  // Different bots enter on different sides: fixed per bot, so a lobby does not
+  // funnel through one gap in the storm.
+  bool differ = false;
+  for (size_t i = 1; i < first_dests.size(); ++i)
+    if (length(first_dests[i] - first_dests[0]) > 5.f) differ = true;
+  CHECK(differ, "different bots rotate in on different lines");
+
+  // Same bot, same world, twice: the line is a habit, not noise.
+  Brain a(persona_rotator(), 240), c(persona_rotator(), 240);
+  WorldSnapshot w = peaceful_world();
+  w.distance_to_circle_edge = 60.f;
+  w.circle_next_center_x = 1000.f;
+  w.circle_next_center_y = -500.f;
+  w.circle_radius = 300.f;
+  CHECK(length(a.think(w).move_to - c.think(w).move_to) < 1e-3f,
+        "the rotation line is stable for a given bot, not re-rolled");
+}
+
 static void test_brain_engage_vs_flee() {
   std::printf("brain: aggression and health change the fight decision\n");
   {
@@ -183,8 +237,14 @@ static void test_plan_path_carries_the_intent() {
     const Decision d = b.think(w);
     CHECK(d.reason == "plan", "first think() is a plan tick");
     CHECK(d.action == ActionKind::RotateToCircle, "rotates out of the storm");
-    CHECK(d.move_to.x == 500.f && d.move_to.y == 300.f,
-          "plan tick points the bot at the circle, not at the world origin");
+    // The destination must be a real point INSIDE the ring, not the world origin.
+    // Deliberately not "exactly the centre": a beeline to the centre is itself a bot
+    // tell, so the rotation target is offset within the ring (see the rotation test).
+    CHECK(d.move_to.x != 0.f || d.move_to.y != 0.f,
+          "plan tick has a real destination, not the world origin");
+    const float dx = d.move_to.x - 500.f, dy = d.move_to.y - 300.f;
+    CHECK(std::sqrt(dx * dx + dy * dy) < w.circle_radius,
+          "and that destination is inside the ring it is rotating into");
   }
   {
     Brain b(persona_w_keyer(), 22);
@@ -290,6 +350,90 @@ static void test_motor_damage_flinch() {
   CHECK(!m.damage_reacts(100.0, 20.f), "the same instant cannot be reacted to twice");
   CHECK(!m.damage_reacts(100.05, 20.f), "no reaction 50ms later");
   CHECK(m.damage_reacts(101.0, 20.f), "reacts after the latency window");
+}
+
+// A target crossing at sprint speed. Humans lead it; a bot that sits exactly on the
+// target's CURRENT position is the classic non-leading aimbot, and one that lands
+// perfectly on the predicted position is the other kind. The skill spread must show
+// up as a spread in how well the lead is applied.
+static void test_motor_leads_a_moving_target() {
+  std::printf("motor: leads a strafing target, imperfectly\n");
+  std::vector<float> lead_by_skill;
+  for (float skill : {0.05f, 0.5f, 0.95f}) {
+    Persona p = persona_rotator();
+    p.aim_skill = skill;
+    Motor m(p, 91);
+    const Vec3 self{0.f, 0.f, 0.f};
+    const float speed = 5.5f;
+    float yaw = 0.f, pitch = 0.f;
+    float lead_sum = 0.f;
+    int n = 0;
+    for (int i = 0; i < 60 * 12; ++i) {
+      const float t = static_cast<float>(i) / 60.f;
+      const Vec3 tp{18.f, speed * t, 0.f};
+      const TargetMotion tm(Vec3{0.f, speed, 0.f});
+      const MotorOutput o = m.aim_at(self, yaw, pitch, tp, false, 1.f / 60.f, tm);
+      yaw = o.yaw_deg;
+      pitch = o.pitch_deg;
+      if (i > 60 * 6) {  // settled: past the initial swing
+        lead_sum += wrap180(yaw - yaw_between(self, tp));
+        ++n;
+      }
+    }
+    lead_by_skill.push_back(lead_sum / static_cast<float>(n));
+  }
+  // Leading means the crosshair sits AHEAD of where the target is now.
+  CHECK(lead_by_skill[1] > 0.f, "a mid-skill bot leads a crossing target, it does not trail it");
+  CHECK(lead_by_skill[2] > lead_by_skill[0], "better aim leads more consistently");
+  // And not by a machine-perfect amount: the lead is small, in the human band.
+  for (float l : lead_by_skill) CHECK(l < 6.f, "the lead is human-sized, not a prediction lock");
+}
+
+// Vertical aim did not exist at all: pitch_deg was written nowhere, so every bot
+// tracked dead level for a whole match. Zero variance in pitch across a match is
+// the kind of thing a replay detector finds in one pass.
+static void test_motor_aims_vertically() {
+  std::printf("motor: pitch is real, it tracks height and carries recoil\n");
+  {
+    Persona p = persona_rotator();
+    Motor m(p, 92);
+    const Vec3 self{0.f, 0.f, 0.f};
+    const Vec3 high{20.f, 0.f, 12.f};  // a target on a ramp above
+    float yaw = 0.f, pitch = 0.f;
+    for (int i = 0; i < 120; ++i) {
+      const MotorOutput o = m.aim_at(self, yaw, pitch, high, false, 1.f / 60.f);
+      yaw = o.yaw_deg;
+      pitch = o.pitch_deg;
+    }
+    CHECK(pitch > 15.f, "aims UP at a target above it (12m up at 20m is ~31 deg)");
+  }
+  {
+    Persona p = persona_rotator();
+    Motor m(p, 93);
+    const Vec3 self{0.f, 0.f, 0.f};
+    const Vec3 low{20.f, 0.f, -8.f};
+    float yaw = 0.f, pitch = 0.f;
+    for (int i = 0; i < 120; ++i) {
+      const MotorOutput o = m.aim_at(self, yaw, pitch, low, false, 1.f / 60.f);
+      yaw = o.yaw_deg;
+      pitch = o.pitch_deg;
+    }
+    CHECK(pitch < -10.f, "aims DOWN at a target below it");
+  }
+  {
+    // Idle looking must not lock the view to the horizon either.
+    Persona p = persona_camper();
+    Motor m(p, 94);
+    float yaw = 0.f, pitch = 0.f;
+    bool saw_vertical = false;
+    for (int i = 0; i < 60 * 60; ++i) {
+      const MotorOutput o = m.idle_look(yaw, pitch, 1.f / 60.f);
+      yaw = o.yaw_deg;
+      pitch = o.pitch_deg;
+      if (std::fabs(pitch) > 1.f) saw_vertical = true;
+    }
+    CHECK(saw_vertical, "an idle player's view is not welded to the horizon");
+  }
 }
 
 static void test_motor_runs_dry_and_reloads() {
@@ -1096,6 +1240,7 @@ int main() {
   test_perception_fov();
   test_perception_lock_takes_time();
   test_brain_zone_priority();
+  test_rotation_is_not_a_beeline_to_the_centre();
   test_brain_engage_vs_flee();
   test_brain_heal();
   test_plan_path_carries_the_intent();
@@ -1105,6 +1250,8 @@ int main() {
   test_motor_fire_is_not_instant();
   test_motor_build_cadence_scales_with_skill();
   test_motor_damage_flinch();
+  test_motor_leads_a_moving_target();
+  test_motor_aims_vertically();
   test_motor_runs_dry_and_reloads();
   test_motor_tops_up_before_being_caught_dry();
   test_locomotion_strafes_in_a_fight_not_on_a_metronome();
