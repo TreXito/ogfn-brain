@@ -443,7 +443,10 @@ static void test_motor_fire_is_not_instant() {
     if (o.firing && first_fire_tick < 0) first_fire_tick = i;
     yaw = o.yaw_deg;
   }
-  CHECK(first_fire_tick > 15, "no shot before the crosshair is anywhere near the target");
+  // >= 15 ticks is a quarter of a second: the intent is "not on the frame the target
+  // appears". Track feed-forward legitimately shaved one tick off the old >15.
+  CHECK(first_fire_tick >= 12,
+        "no shot until the crosshair is actually near the target (a quarter second)");
 }
 
 static void test_motor_build_cadence_scales_with_skill() {
@@ -508,6 +511,50 @@ static void test_motor_leads_a_moving_target() {
   CHECK(lead_by_skill[2] > lead_by_skill[0], "better aim leads more consistently");
   // And not by a machine-perfect amount: the lead is small, in the human band.
   for (float l : lead_by_skill) CHECK(l < 6.f, "the lead is human-sized, not a prediction lock");
+}
+
+// Tracking a strafing target is the thing a bot most obviously fails at: a pure
+// error-driven servo lags by an amount proportional to the target's angular speed,
+// so measured error grew without bound (9.7 deg at 34 deg/s, and 0% of ticks on target
+// at a real sprint strafe). A human locks onto the motion and moves with it. These
+// are real strafe speeds: 5.5 m/s sideways at 18m is a sprint, not a teleport.
+static void test_motor_tracks_a_real_strafe() {
+  std::printf("motor: tracks a strafing target at human error\n");
+  struct Case { float speed; float max_err; float min_on_target; };
+  for (const Case& c : {Case{2.5f, 3.0f, 0.30f}, Case{5.5f, 5.5f, 0.10f}}) {
+    double sum = 0;
+    int n = 0, on_target = 0, fired = 0;
+    for (uint64_t seed = 600; seed < 620; ++seed) {
+      Rng seeder(seed);
+      Persona p = Persona::sample(seeder, 0.f);
+      Motor m(p, seed);
+      const Vec3 self{0.f, 0.f, 0.f};
+      float yaw = 0.f, pitch = 0.f, y = 0.f;
+      bool dir = true;
+      for (int i = 0; i < 60 * 30; ++i) {
+        const double t = i / 60.0;
+        if (std::fmod(t, 1.1) < 1.0 / 60.0) dir = !dir;   // a strafe flips direction
+        y += (dir ? 1.f : -1.f) * c.speed / 60.f;
+        const Vec3 tp{18.f, y, 0.f};
+        const TargetMotion tm(Vec3{0.f, (dir ? 1.f : -1.f) * c.speed, 0.f});
+        const MotorOutput o = m.aim_at(self, yaw, pitch, tp, true, 1.f / 60.f, tm);
+        yaw = o.yaw_deg;
+        pitch = o.pitch_deg;
+        if (t > 2.0) {
+          const float e = m.aim_error_deg();
+          sum += e;
+          ++n;
+          if (e < 1.9f) ++on_target;   // 0.6m body at 18m
+          if (o.firing) ++fired;
+        }
+      }
+    }
+    const float mean_err = static_cast<float>(sum / n);
+    const float on_frac = static_cast<float>(on_target) / static_cast<float>(n);
+    CHECK(mean_err < c.max_err, "tracking error stays human at this strafe speed");
+    CHECK(on_frac > c.min_on_target, "and the crosshair is actually on the body sometimes");
+    CHECK(fired > 0, "and it gets shots off instead of never firing");
+  }
 }
 
 // A human flick across 80 degrees peaks at roughly 300-800 deg/s and settles in
@@ -1521,6 +1568,7 @@ int main() {
   test_motor_leads_a_moving_target();
   test_motor_aims_vertically();
   test_motor_flick_speed_is_human();
+  test_motor_tracks_a_real_strafe();
   test_motor_runs_dry_and_reloads();
   test_motor_tops_up_before_being_caught_dry();
   test_locomotion_strafes_in_a_fight_not_on_a_metronome();
