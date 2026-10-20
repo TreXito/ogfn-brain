@@ -133,9 +133,20 @@ float Brain::score(ActionKind k, const WorldSnapshot& w) const {
 
     case ActionKind::Flee: {
       if (!engaged) return 0.f;
+      // Nobody runs from a distant enemy at full health. Without a distance term a
+      // 100hp bot fled a target 50m away, which reads as cowardice the game does not
+      // have: you disengage from something that can actually hurt you, and the
+      // further it is the less it can.
+      const float threat = clampf(1.f - (w.target_distance - 8.f) / 32.f, 0.f, 1.f);
+      if (threat <= 0.02f) return 0.f;
       float s = 0.20f * (0.3f + p.caution);
       s *= lerpf(2.6f, 0.2f, hp);  // only desperate bots run
+      s *= threat;                 // and only from something close
       s *= 1.f - p.aggression * 0.5f;
+      // Desperation bonus: at near-death, leaving is better than any trade or build.
+      // Without it Build always won for a hurt bot (building is scored highest when
+      // low), so nothing ever fled in someone's face at 10hp.
+      if (hp < 0.25f) s *= 2.4f;
       return s;
     }
 

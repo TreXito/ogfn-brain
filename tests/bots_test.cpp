@@ -178,6 +178,34 @@ static void test_rotation_is_not_a_beeline_to_the_centre() {
 // A bot 20m outside the ring with an enemy 25m away used to choose ENGAGE. A player
 // in the storm runs: the storm is a guaranteed death, the fight is not. Measured in a
 // 50-bot match before the fix, the storm killed 1 bot while fights killed 47.
+// Flee was scored with no distance term, so a bot at FULL HEALTH ran from an enemy
+// 50m away. Overcorrecting the other way made Build win every time, so a bot at 10hp
+// with someone in its face never left. Both directions are wrong.
+static void test_flee_requires_real_danger() {
+  std::printf("brain: flees from close danger only, never from a distant enemy\n");
+  auto act = [](float hp, float dist) {
+    Brain b(persona_camper(), 451);   // the most cautious persona
+    WorldSnapshot w = peaceful_world();
+    w.distance_to_circle_edge = -60.f;
+    w.self_health = hp;
+    w.self_shield = 0.f;
+    w.target_is_visible = true;
+    w.target_distance = dist;
+    w.enemies_within_30m = dist < 30.f ? 1 : 0;
+    w.loot_within_30m = 0;
+    w.shield_potions = 0;
+    return b.think(w).action;
+  };
+  // Full health: never runs, at any range.
+  for (float d : {10.f, 25.f, 50.f})
+    CHECK(act(100.f, d) != ActionKind::Flee, "a full-health bot does not run away");
+  // Badly hurt and close: leaving is correct.
+  CHECK(act(10.f, 10.f) == ActionKind::Flee, "a near-dead bot runs from someone in its face");
+  CHECK(act(20.f, 25.f) == ActionKind::Flee, "and from a close fight it is losing");
+  // Badly hurt but the threat is far: no reason to run from 50m.
+  CHECK(act(10.f, 50.f) != ActionKind::Flee, "a near-dead bot does not run from a distant enemy");
+}
+
 static void test_storm_outranks_a_fight() {
   std::printf("brain: being in the storm outranks taking a fight\n");
   for (float edge : {2.f, 12.f, 25.f, 60.f, 200.f}) {
@@ -1554,6 +1582,7 @@ int main() {
   test_perception_lock_takes_time();
   test_brain_zone_priority();
   test_rotation_is_not_a_beeline_to_the_centre();
+  test_flee_requires_real_danger();
   test_storm_outranks_a_fight();
   test_brain_engage_vs_flee();
   test_brain_heal();
