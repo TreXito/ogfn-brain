@@ -17,7 +17,7 @@ No cmake, no network, no gtest needed. g++ 15 and make are enough.
 
 ## What "human" means here, mechanically
 
-Eight layers, each one a place where a naive bot gives itself away:
+Nine layers, each one a place where a naive bot gives itself away:
 
 1. **Perception** (`perception.cpp`): FOV cone, range limit, occlusion, no
    wallhack, and a 4 second memory after losing sight. Lock-on takes ~0.35s.
@@ -45,6 +45,13 @@ Eight layers, each one a place where a naive bot gives itself away:
    thing on the floor, the same pot at 100 shield is clutter), distance on a steep
    curve, and how long the circle gives you. Two bots with identical inventories
    disagree because their personas weight it differently.
+9. **Squad** (`squad.cpp`): teammates are excluded from targets at the perception
+   layer, so a bot cannot shoot its own squad no matter what downstream does. Then
+   focus fire (everyone on the same body, called or simply converged), a revive
+   that outranks the plan and is one committed 14s attempt rather than a mode,
+   spacing so two bots never share a doorway, and help calls that a losing bot
+   makes at most every 4s. An empty squad list is a bit-for-bit no-op, so solo
+   lobbies are unchanged.
 8. **Building** (`building.cpp`): plans are sequences, not intentions. Losing a
    trade boxes up (three walls, an edited window, closing wall, roof), a healthy
    push ramps with a wall between each ramp, and a peek is a wall plus a window.
@@ -70,18 +77,18 @@ tools/autoloop.sh --engine "..."  # also invoke an agent CLI with the brief
 
 ## Next work, ranked
 
-1. **Squad and teammate behaviour.** Everything here is a solo bot. Add pack
-   logic: shared target calling, revive intent, not stacking on one another.
-2. **Interpolation tuning against real matches.** Record a human playing, compare
+1. **Interpolation tuning against real matches.** Record a human playing, compare
    reaction and trigger telemetry against `bench`, and move the constants.
-3. **Weapon feel per class.** One `WeaponProfile` now exists (mag + reload), but
+2. **Weapon feel per class.** One `WeaponProfile` now exists (mag + reload), but
    shotgun, AR and sniper still share one trigger discipline curve.
-4. **Build failure recovery.** The builder plans; it does not notice when a piece
+3. **Build failure recovery.** The builder plans; it does not notice when a piece
    is refused (no resource, blocked cell) and re-plan around it.
+4. **Squad revive verification live.** The squad layer is unit tested and measured
+   in the bench, but the adapter has no downed-state or revive verb wiring yet.
 
 Done: movement model (strafe, peek, crouch, fall bracing), the magazine,
-building as a fight (box up, covered ramp push, window edits), and loot
-valuation.
+building as a fight (box up, covered ramp push, window edits), loot valuation,
+and squad coordination (focus fire, revive, spacing, help calls).
 
 ## Integration contract
 

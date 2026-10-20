@@ -809,6 +809,207 @@ static void test_brain_loot_intent_has_a_destination() {
   }
 }
 
+static void test_perception_ignores_teammates() {
+  std::printf("squad: a teammate is never a target\n");
+  Perception perc;
+  Observation obs;
+  obs.self_pos = {0.f, 0.f, 0.f};
+  obs.self_yaw_deg = 0.f;
+  EnemySample mate;
+  mate.id = 1;
+  mate.pos = {8.f, 0.f, 0.f};   // right in front, in the FOV, in range
+  mate.line_of_sight = true;
+  mate.is_teammate = true;
+  EnemySample enemy;
+  enemy.id = 2;
+  enemy.pos = {20.f, 0.f, 0.f};
+  enemy.line_of_sight = true;
+  obs.enemies = {mate, enemy};
+  perc.update(obs, 0.0);
+  CHECK(perc.by_id(1) == nullptr, "a teammate in front of the muzzle is not tracked");
+  CHECK(perc.nearest(true) != nullptr && perc.nearest(true)->id == 2,
+        "the nearest TARGET is the enemy, not the squadmate standing closer");
+  CHECK(perc.targets().size() == 1, "teammates never enter the target list at all");
+}
+
+static void test_squad_focus_fire() {
+  std::printf("squad: everyone shoots the same target\n");
+  SquadBrain a(71), b(72);
+  const Vec3 self{0.f, 0.f, 0.f};
+  {
+    // A teammate is already shooting target 5, which is also visible to me.
+    Teammate mate;
+    mate.id = 2;
+    mate.pos = Vec3(5.f, 0.f, 0.f);
+    mate.health = 200.f;
+    mate.target_id = 5;
+    const SquadDirective d = a.update({mate}, {3, 5}, self, 1.f, true, false, 1000);
+    CHECK(d.focus_target_id == 5, "joins the target a squadmate is already shooting");
+  }
+  {
+    // Nobody calling: two bots given the same enemy list must converge anyway, or a
+    // squad splits its damage and loses every even fight.
+    const SquadDirective da = a.update({}, {7, 2, 9}, self, 1.f, true, false, 2000);
+    const SquadDirective db = b.update({}, {9, 2, 7}, self, 1.f, true, false, 2000);
+    CHECK(da.focus_target_id == db.focus_target_id, "uncalled targets still converge");
+    CHECK(da.focus_target_id == 2, "on the lowest id, deterministically");
+  }
+  {
+    // A called target that I cannot see is not my focus: I would walk at a wall.
+    Teammate mate;
+    mate.id = 2;
+    mate.pos = Vec3(5.f, 0.f, 0.f);
+    mate.target_id = 42;   // not in my visible list
+    const SquadDirective d = a.update({mate}, {3}, self, 1.f, true, false, 3000);
+    CHECK(d.focus_target_id == 3, "a call for something out of my view falls back to what I can see");
+  }
+}
+
+static void test_squad_revives_before_looting() {
+  std::printf("squad: a downed squadmate outranks the plan\n");
+  SquadBrain sb(73);
+  const Vec3 self{0.f, 0.f, 0.f};
+  Teammate body;
+  body.id = 4;
+  body.pos = Vec3(6.f, 0.f, 0.f);
+  body.downed = true;
+
+  const SquadDirective not_in_fight = sb.update({body}, {}, self, 0.9f, false, false, 1000);
+  CHECK(not_in_fight.should_revive, "goes for the body when not fighting");
+  CHECK(not_in_fight.revive_id == 4, "and names which body");
+  CHECK(not_in_fight.focus_target_id == 0, "does not call a target while reviving");
+
+  // Already being revived by someone else: do not stack on the body.
+  Teammate taken = body;
+  taken.revive_in_progress = true;
+  const SquadDirective taken_d = sb.update({taken}, {}, self, 0.9f, false, false, 1100);
+  CHECK(!taken_d.should_revive, "leaves a revive that someone else is already doing");
+
+  // A body 60m away is not this bot's job.
+  Teammate far_body = body;
+  far_body.pos = Vec3(60.f, 0.f, 0.f);
+  const SquadDirective far_d = sb.update({far_body}, {}, self, 0.9f, false, false, 1200);
+  CHECK(!far_d.should_revive, "does not cross the map for a body that is not nearby");
+
+  // Push comes to shove: fight first, revive after.
+  const SquadDirective pushed = sb.update({body}, {9}, self, 0.9f, true, true, 1300);
+  CHECK(!pushed.should_revive, "does not revive into a live fight on top of the body");
+}
+
+static void test_squad_revive_is_one_attempt_not_a_mode() {
+  std::printf("squad: a revive is one committed attempt, then the bot plays on\n");
+  SquadBrain sb(78);
+  const Vec3 self{0.f, 0.f, 0.f};
+  Teammate body;
+  body.id = 4;
+  body.pos = Vec3(6.f, 0.f, 0.f);
+  body.downed = true;
+
+  // Committed at the sighting, and held for the walk/revive window.
+  CHECK(sb.update({body}, {}, self, 0.9f, false, false, 1000).should_revive,
+        "commits to the body");
+  CHECK(sb.update({body}, {}, self, 0.9f, false, false, 8000).should_revive,
+        "holds the commitment while walking to it");
+  // Window over: the bot must go back to playing, not stand on the body forever.
+  // An unbounded rule made this 100% of ticks, i.e. a permanently stuck bot.
+  CHECK(!sb.update({body}, {}, self, 0.9f, false, false, 40000).should_revive,
+        "gives up after the hold window instead of stalling on the body");
+  CHECK(!sb.update({body}, {}, self, 0.9f, false, false, 60000).should_revive,
+        "and does not re-arm on the same body");
+
+  // A DIFFERENT body later is a fresh attempt: the latch is per body.
+  Teammate second;
+  second.id = 9;
+  second.pos = Vec3(7.f, 0.f, 0.f);
+  second.downed = true;
+  CHECK(sb.update({second}, {}, self, 0.9f, false, false, 90000).should_revive,
+        "a new body is a new attempt");
+}
+
+static void test_squad_spacing_and_help() {
+  std::printf("squad: does not stack, and calls for help\n");
+  SquadBrain sb(74);
+  const Vec3 self{0.f, 0.f, 0.f};
+  {
+    Teammate close;
+    close.id = 2;
+    close.pos = Vec3(1.f, 0.f, 0.f);   // 1m away: inside one grenade
+    const SquadDirective d = sb.update({close}, {}, self, 1.f, false, false, 1000);
+    CHECK(d.should_spread, "standing inside a squadmate is a spread order");
+    CHECK(d.spacing >= 3.f, "and the target distance is real spacing, not a nudge");
+    CHECK(d.spread_from.x == 1.f, "spreads relative to the squadmate");
+  }
+  {
+    Teammate apart;
+    apart.id = 2;
+    apart.pos = Vec3(12.f, 0.f, 0.f);
+    const SquadDirective d = sb.update({apart}, {}, self, 1.f, false, false, 1000);
+    CHECK(!d.should_spread, "no spread order when already apart");
+  }
+  {
+    // Help calls: only when actually losing, and rate limited.
+    SquadBrain s2(75);
+    const SquadDirective d1 = s2.update({}, {1}, self, 0.25f, true, true, 1000);
+    CHECK(d1.requesting_help, "a hurt bot in a losing fight calls for help");
+    const SquadDirective d2 = s2.update({}, {1}, self, 0.25f, true, true, 1500);
+    CHECK(!d2.requesting_help, "but does not spam the call");
+    const SquadDirective d3 = s2.update({}, {1}, self, 0.25f, true, true, 9000);
+    CHECK(d3.requesting_help, "calls again later if still losing");
+    SquadBrain s3(76);
+    const SquadDirective healthy = s3.update({}, {1}, self, 0.95f, true, true, 1000);
+    CHECK(!healthy.requesting_help, "a healthy bot does not ask for help");
+  }
+}
+
+static void test_brain_squad_revive_overrides_the_plan() {
+  std::printf("brain: a revive becomes the decision, with a real destination\n");
+  Brain b(persona_rotator(), 77);
+  WorldSnapshot w = peaceful_world();
+  w.self_pos = Vec3(100.f, 100.f, 0.f);
+  w.circle_next_center_x = 900.f;
+  w.circle_next_center_y = 900.f;
+  Teammate body;
+  body.id = 3;
+  body.pos = Vec3(106.f, 100.f, 0.f);
+  body.downed = true;
+  w.teammates = {body};
+  const Decision d = b.think(w);
+  CHECK(d.action == ActionKind::Revive, "the action is Revive, not a disguised rotation");
+  CHECK(d.move_to.x == 106.f && d.move_to.y == 100.f, "and it walks to the body");
+  CHECK(d.reason == "revive squadmate", "the reason says why");
+}
+
+static void test_brain_solo_behaviour_is_unchanged() {
+  std::printf("brain: with no teammates, squad logic is a no-op\n");
+  for (uint64_t seed = 80; seed < 90; ++seed) {
+    Brain solo(persona_rotator(), seed);
+    Brain squadded(persona_rotator(), seed);
+    WorldSnapshot base = peaceful_world();
+    base.time = 0.0;
+    std::string a, b2;
+    std::string c, d2;
+    for (int i = 0; i < 300; ++i) {
+      WorldSnapshot w = base;
+      w.time = i * (1.0 / 60.0);
+      w.self_health = 50.f + static_cast<float>(i % 5) * 10.f;
+      w.loot_within_30m = i % 4;
+      w.loot.clear();
+      w.loot.push_back({1, Vec3(6.f, 0.f, 0.f), ItemClass::ShieldBig, 1});
+      w.enemies_within_30m = i % 3;
+      w.target_is_visible = (i % 4) < 2;
+      w.target_distance = 12.f + static_cast<float>(i % 30);
+      a += to_string(solo.think(w).action);
+      // Same world, but the snapshot claims an empty squad list.
+      WorldSnapshot ws = w;
+      ws.teammates.clear();
+      b2 += to_string(squadded.think(ws).action);
+    }
+    CHECK(a == b2, "a solo bot with an empty squad list behaves identically");
+    (void)c;
+    (void)d2;
+  }
+}
+
 static std::string traced_run(uint64_t seed, int ticks) {
   Brain b(persona_rotator(), seed);
   std::string trace;
@@ -919,6 +1120,13 @@ int main() {
   test_loot_choice_picks_the_best_not_the_nearest();
   test_loot_preferences_differ_between_bots();
   test_brain_loot_intent_has_a_destination();
+  test_perception_ignores_teammates();
+  test_squad_focus_fire();
+  test_squad_revives_before_looting();
+  test_squad_revive_is_one_attempt_not_a_mode();
+  test_squad_spacing_and_help();
+  test_brain_squad_revive_overrides_the_plan();
+  test_brain_solo_behaviour_is_unchanged();
   test_building_is_not_a_macro();
   test_building_goal_selection();
   test_population_spread();

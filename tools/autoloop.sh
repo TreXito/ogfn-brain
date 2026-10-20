@@ -87,6 +87,9 @@ if [[ -f "$BENCH" ]]; then
   edits=$(grep -oP 'edits \K[0-9]+' "$BENCH" | head -1)
   lootdec=$(grep -oP 'loot: \K[0-9]+' "$BENCH" | head -1)
   lootorigin=$(grep -oP 'walked-at-origin \K[0-9]+' "$BENCH" | head -1)
+  revives=$(grep -oP 'squad: revives \K[0-9]+' "$BENCH" | head -1)
+  focus=$(grep -oP 'focus calls \K[0-9]+' "$BENCH" | head -1)
+  spread=$(grep -oP 'spread orders \K[0-9]+' "$BENCH" | head -1)
 
   check() { # name value min max
     local name="$1" v="$2" lo="$3" hi="$4"
@@ -114,6 +117,15 @@ if [[ -f "$BENCH" ]]; then
   else
     report "  loot decisions: $lootdec (ok)"
   fi
+  for pair in "revives:$revives" "focus calls:$focus" "spread orders:$spread"; do
+    name="${pair%%:*}"; val="${pair##*:}"
+    if [[ -z "$val" || "$val" -eq 0 ]]; then
+      report "  squad $name: MISSING or 0 (squad layer inert)"
+      FAILED=1
+    else
+      report "  squad $name: $val (ok)"
+    fi
+  done
   if [[ -n "$lootorigin" && "$lootorigin" -gt 0 ]]; then
     report "  loot with no destination: $lootorigin (move_to at the origin bug)"
     FAILED=1

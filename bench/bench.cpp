@@ -58,6 +58,13 @@ struct Stats {
   int loot_walked_to_origin = 0;
   float loot_worth_sum = 0.f;
   int loot_kinds[13] = {0};
+  // Squad telemetry. Without teammates in the scripted world the solo path is what
+  // gets exercised, so these count the squad-shaped intents that DID appear.
+  int revives = 0;          // revive EPISODES (a 14s hold is one, not 840 ticks)
+  bool in_revive = false;
+  int focus_calls = 0;
+  int spread_orders = 0;
+  int help_calls = 0;
   bool last_crouch = false;
   std::vector<float> burst_lengths;
 };
@@ -139,7 +146,7 @@ WorldSnapshot scripted_world(double t, uint64_t life) {
   return w;
 }
 
-Stats run_life(uint64_t seed, double minutes) {
+Stats run_life(uint64_t seed, double minutes, bool in_squad = false) {
   Stats s;
   Rng seeder(seed * 2654435761ull + 12345ull);
   const Persona p = Persona::sample(seeder, 0.f);
@@ -160,6 +167,41 @@ Stats run_life(uint64_t seed, double minutes) {
   for (int i = 0; i < ticks; ++i) {
     const double t = static_cast<double>(i) * static_cast<double>(dt);
     WorldSnapshot w = scripted_world(t, seed);
+    // Squad context: half the lives run as a pair, so the squad layer is actually
+    // exercised instead of only proven inert. The teammate is a synthetic body that
+    // goes down periodically, which is the only way a revive can be measured.
+    if (in_squad) {
+      w.teammates.clear();
+      Teammate mate;
+      mate.id = 5000 + static_cast<int>(seed % 97);
+      // A teammate orbiting the bot at 3 to 9 m: close enough to trigger spacing.
+      const float ang = static_cast<float>(t) * 0.3f;
+      const float rad = 3.f + 6.f * (0.5f + 0.5f * static_cast<float>(std::sin(t / 5.0)));
+      mate.pos = Vec3(w.self_pos.x + std::cos(ang) * rad,
+                      w.self_pos.y + std::sin(ang) * rad, 0.f);
+      mate.health = 200.f;
+      // Down for a 4s window every 40s, outside of contacts so a revive is correct.
+      mate.downed = std::fmod(t, 40.0) > 30.0 && !w.target_is_visible;
+      w.teammates.push_back(mate);
+      w.enemies_pushing_me = w.target_is_visible && std::fmod(t, 7.0) < 2.0;
+      w.now_ms = static_cast<uint64_t>(t * 1000.0);
+    }
+    // Perception needs an actual enemy sample for the squad layer to call a focus
+    // target: it only focuses on things this bot can SEE. Without this the focus
+    // path is never exercised and "squad focus fire" would be an unmeasured claim.
+    {
+      Observation obs;
+      obs.self_pos = w.self_pos;
+      obs.self_yaw_deg = 0.f;
+      if (w.target_is_visible) {
+        EnemySample e;
+        e.id = 700 + static_cast<int>(seed % 13);
+        e.pos = Vec3(w.self_pos.x + w.target_distance, w.self_pos.y, 0.f);
+        e.line_of_sight = true;
+        obs.enemies.push_back(e);
+      }
+      brain.observe(obs, t);
+    }
     const Decision d = brain.think(w);
     ++s.frames;
     s.action_counts[to_string(d.action)]++;
@@ -226,6 +268,16 @@ Stats run_life(uint64_t seed, double minutes) {
     const bool taking_fire = w.target_is_visible && w.self_health < 70.f;
     const BuildInput bi = builder.update(dt, d.action == ActionKind::Build, taking_fire,
                                          health_frac, 0.f, true);
+    // Squad: focus calls and revives are the two that change what a bot does.
+    if (brain.squad_directive().focus_target_id != 0) ++s.focus_calls;
+    // Count episodes, not ticks: "revives per minute" is a rate people can reason
+    // about, and a per-tick count made a healthy 14s hold look like 840 revives.
+    const bool reviving = d.action == ActionKind::Revive;
+    if (reviving && !s.in_revive) ++s.revives;
+    s.in_revive = reviving;
+    if (brain.squad_directive().should_spread) ++s.spread_orders;
+    if (brain.squad_directive().requesting_help) ++s.help_calls;
+
     // Loot: did the decision carry a destination, and what did it pick?
     if (d.action == ActionKind::Loot && d.reason == "plan") {
       ++s.loot_decisions;
@@ -278,7 +330,10 @@ int main(int argc, char** argv) {
 
   for (int life = 0; life < lives; ++life) {
     const uint64_t seed = base_seed + static_cast<uint64_t>(life);
-    const Stats s = run_life(seed, minutes);
+    // Every other life runs with a squadmate, so squad behaviour is measured rather
+    // than assumed. Solo lives stay solo so a regression in the solo path still shows
+    // up against the same numbers as before.
+    const Stats s = run_life(seed, minutes, (life % 2) == 1);
     for (const auto& kv : s.action_counts) total.action_counts[kv.first] += kv.second;
     total.time_hurt += s.time_hurt;
     total.time_safe += s.time_safe;
@@ -295,6 +350,10 @@ int main(int argc, char** argv) {
     total.jumps += s.jumps;
     total.reloads += s.reloads;
     total.dry_ticks += s.dry_ticks;
+    total.revives += s.revives;
+    total.focus_calls += s.focus_calls;
+    total.spread_orders += s.spread_orders;
+    total.help_calls += s.help_calls;
     total.loot_decisions += s.loot_decisions;
     total.loot_no_target += s.loot_no_target;
     total.loot_walked_to_origin += s.loot_walked_to_origin;
@@ -334,6 +393,8 @@ int main(int argc, char** argv) {
               static_cast<float>(total.build_inputs) / (denom / 60.f));
   std::printf("time in contact: %.1f%% of life\n",
               100.f * total.time_hurt / (total.time_hurt + total.time_safe));
+  std::printf("squad: revives %d  focus calls %d  spread orders %d  help calls %d\n",
+              total.revives, total.focus_calls, total.spread_orders, total.help_calls);
   {
     const int denom_dec = (std::max)(1, total.loot_decisions);
     std::printf("loot: %d decisions  %.0f%% had a target  mean worth %.2f  "
@@ -429,6 +490,24 @@ int main(int argc, char** argv) {
   }
   // Loot: decisions must exist, mostly have somewhere to go, and never point at the
   // world origin (the (0,0,0) intent bug).
+  // Squad behaviour must actually happen in the squad lives (otherwise the layer is
+  // inert and the "squad support" claim is empty), and must NOT happen without
+  // teammates. Totals here mix solo and pair lives, so assert on presence and
+  // plausibility rather than zero.
+  if (total.revives == 0 || total.spread_orders == 0) {
+    std::printf("\nFAIL squad behaviour never fired in the paired lives "
+                "(revives=%d spread=%d)\n", total.revives, total.spread_orders);
+    ++failures;
+  }
+  // A revive is a 14s hold, so a 6 minute life can attempt at most ~25. Far more than
+  // that means it re-arms continuously, which is a stuck bot.
+  const float revive_per_life = static_cast<float>(total.revives) /
+                                (static_cast<float>(lives) * static_cast<float>(minutes));
+  if (revive_per_life > 1.f) {
+    std::printf("\nFAIL %.2f revive episodes per bot-minute (want <1: revive re-arming "
+                "continuously)\n", revive_per_life);
+    ++failures;
+  }
   if (total.loot_decisions == 0) {
     std::printf("\nFAIL bots never decide to loot\n");
     ++failures;
