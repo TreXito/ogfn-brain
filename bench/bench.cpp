@@ -38,6 +38,15 @@ struct Stats {
   int trigger_ticks = 0;
   int trigger_windows = 0;
   int bursts = 0;
+  // Movement telemetry. These are the numbers that say whether a bot in a fight
+  // looks alive, so they belong in the same report as aim and trigger data.
+  int strafe_ticks = 0;
+  int crouch_ticks = 0;
+  int crouch_changes = 0;
+  int jumps = 0;
+  int reloads = 0;
+  int dry_ticks = 0;
+  bool last_crouch = false;
   std::vector<float> burst_lengths;
 };
 
@@ -93,6 +102,8 @@ Stats run_life(uint64_t seed, double minutes) {
   const Persona p = Persona::sample(seeder, 0.f);
   Brain brain(p, seed);
   Motor motor(p, seed ^ 0x9E3779B9ull);
+  Locomotion loco(p, seed ^ 0x51ED270Bull);
+  motor.set_weapon(WeaponProfile(30, 2.6f));
 
   const float dt = 1.f / 60.f;
   const int ticks = static_cast<int>(minutes * 60.0 / dt);
@@ -146,6 +157,25 @@ Stats run_life(uint64_t seed, double minutes) {
     ++s.aim_error_n;
     s.build_inputs += motor.build_inputs_this_tick(dt);
 
+    // Locomotion: the third leg of the human-motor tell, after aim and trigger.
+    MoveState ms;
+    ms.airborne = false;
+    ms.has_cover = w.target_is_visible && w.target_distance < 30.f && (i % 240 < 90);
+    ms.on_slope = (i % 900) > 780;
+    const float health_frac = clampf((w.self_health + w.self_shield) / 200.f, 0.f, 1.f);
+    const MoveOutput mo = loco.update(dt, yaw,
+                                      w.target_is_visible ? yaw_between(self_pos, Vec3(w.target_distance, 0.f, 0.f)) : yaw,
+                                      w.target_distance, d.action == ActionKind::Engage ||
+                                                             d.action == ActionKind::Build,
+                                      out.firing, w.target_is_reloading, health_frac, ms);
+    if (mo.strafing) ++s.strafe_ticks;
+    if (mo.crouching) ++s.crouch_ticks;
+    if (mo.crouching != s.last_crouch) ++s.crouch_changes;
+    s.last_crouch = mo.crouching;
+    if (mo.jumping) ++s.jumps;
+    s.reloads = motor.reload_count();
+    if (motor.reloading()) ++s.dry_ticks;
+
     // Reaction telemetry: how long the bot took to adopt an intent after a
     // surprise contact, using the brain's own gate as the witness.
     if (brain.is_reacting(t)) ++s.decisions;
@@ -189,6 +219,12 @@ int main(int argc, char** argv) {
     total.reaction_held += s.reaction_held;
     total.build_inputs += s.build_inputs;
     all_intervals.insert(all_intervals.end(), s.shot_intervals.begin(), s.shot_intervals.end());
+    total.strafe_ticks += s.strafe_ticks;
+    total.crouch_ticks += s.crouch_ticks;
+    total.crouch_changes += s.crouch_changes;
+    total.jumps += s.jumps;
+    total.reloads += s.reloads;
+    total.dry_ticks += s.dry_ticks;
     total.trigger_ticks += s.trigger_ticks;
     total.trigger_windows += s.trigger_windows;
     total.bursts += s.bursts;
@@ -220,6 +256,19 @@ int main(int argc, char** argv) {
               static_cast<float>(total.build_inputs) / (denom / 60.f));
   std::printf("time in contact: %.1f%% of life\n",
               100.f * total.time_hurt / (total.time_hurt + total.time_safe));
+  std::printf("magazine: %.1f reloads/min  reloading %.1f%% of life\n",
+              static_cast<float>(total.reloads) /
+                  (static_cast<float>(lives) * static_cast<float>(minutes)),
+              100.f * static_cast<float>(total.dry_ticks) / denom);
+  std::printf("movement: strafing %.1f%% of contact  crouched %.1f%% of life  "
+              "crouch changes %.1f/min  jumps %.1f/min\n",
+              100.f * static_cast<float>(total.strafe_ticks) /
+                  static_cast<float>(std::max(1.f, total.time_hurt / (1.f / 60.f))),
+              100.f * static_cast<float>(total.crouch_ticks) / denom,
+              static_cast<float>(total.crouch_changes) /
+                  (static_cast<float>(lives) * static_cast<float>(minutes)),
+              static_cast<float>(total.jumps) /
+                  (static_cast<float>(lives) * static_cast<float>(minutes)));
 
   std::printf("\naction mix:\n");
   std::vector<std::pair<std::string, int>> mix(total.action_counts.begin(), total.action_counts.end());
@@ -243,6 +292,31 @@ int main(int argc, char** argv) {
   }
   if (total.shots == 0) {
     std::printf("\nFAIL bots never fired\n");
+    ++failures;
+  }
+  // A bot that holds the trigger for the whole engagement has no magazine, which
+  // you can hear from across the island.
+  const float reload_frac = 100.f * static_cast<float>(total.dry_ticks) / denom;
+  if (reload_frac < 0.5f || reload_frac > 45.f) {
+    std::printf("\nFAIL reloading sits at %.1f%% of life (want 0.5..45%%: either no\n"
+                "magazine model or a reload that never finishes)\n",
+                reload_frac);
+    ++failures;
+  }
+  // A bot that stands still in a fight is the last obvious tell.
+  const float contact_denom = (std::max)(1.f, total.time_hurt / (1.f / 60.f));
+  const float strafe_frac = 100.f * static_cast<float>(total.strafe_ticks) / contact_denom;
+  if (strafe_frac < 50.f) {
+    std::printf("\nFAIL bots strafe only %.1f%% of contact (want >50%%)\n", strafe_frac);
+    ++failures;
+  }
+  // Crouch spam at frame rate is a stutter, not a player. 90 stance changes per
+  // bot-minute is roughly the fastest a hand can tap.
+  const float crouch_per_min = static_cast<float>(total.crouch_changes) /
+                               (static_cast<float>(lives) * static_cast<float>(minutes));
+  if (crouch_per_min > 90.f) {
+    std::printf("\nFAIL %.1f crouch changes/min (want <90: frame-rate crouch spam)\n",
+                crouch_per_min);
     ++failures;
   }
   std::printf("\n%s\n", failures == 0 ? "bench OK" : "bench FAILED");

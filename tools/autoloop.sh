@@ -45,6 +45,15 @@ report() { echo "$@" | tee -a "$LOG"; }
 
 FAILED=0
 
+# 0. Build everything the loop reads. Without this the loop runs whatever
+# binaries happen to be lying in build/ and reports MISSING telemetry as a
+# red bot model when the bench simply was never compiled.
+if ! make -s all test-build bench-build > logs/build.out 2>&1; then
+  tail -20 logs/build.out | tee -a "$LOG"
+  report "BUILD FAILED"
+  exit 1
+fi
+
 # 1. Unit and behavioural tests.
 if ! make -s test > logs/test.out 2>&1; then
   tail -20 logs/test.out | tee -a "$LOG"
