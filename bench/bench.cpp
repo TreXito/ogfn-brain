@@ -46,6 +46,10 @@ struct Stats {
   int jumps = 0;
   int reloads = 0;
   int dry_ticks = 0;
+  int build_pieces = 0;
+  int build_edits = 0;
+  int boxes = 0;
+  BuildGoal last_goal = BuildGoal::None;
   bool last_crouch = false;
   std::vector<float> burst_lengths;
 };
@@ -104,6 +108,7 @@ Stats run_life(uint64_t seed, double minutes) {
   Motor motor(p, seed ^ 0x9E3779B9ull);
   Locomotion loco(p, seed ^ 0x51ED270Bull);
   motor.set_weapon(WeaponProfile(30, 2.6f));
+  Builder builder(p, seed ^ 0xB0117ull);
 
   const float dt = 1.f / 60.f;
   const int ticks = static_cast<int>(minutes * 60.0 / dt);
@@ -176,6 +181,17 @@ Stats run_life(uint64_t seed, double minutes) {
     s.reloads = motor.reload_count();
     if (motor.reloading()) ++s.dry_ticks;
 
+    // Building: the brain's Build action decides the intent, the builder decides
+    // the pieces. Edits matter as much as placements: a bot that walls up and
+    // then walks around its own wall is not building, it is hiding.
+    const bool taking_fire = w.target_is_visible && w.self_health < 70.f;
+    const BuildInput bi = builder.update(dt, d.action == ActionKind::Build, taking_fire,
+                                         health_frac, 0.f, true);
+    if (bi.piece != PieceKind::None) ++s.build_pieces;
+    if (bi.edit) ++s.build_edits;
+    if (builder.goal() == BuildGoal::BoxUp && s.last_goal != BuildGoal::BoxUp) ++s.boxes;
+    s.last_goal = builder.goal();
+
     // Reaction telemetry: how long the bot took to adopt an intent after a
     // surprise contact, using the brain's own gate as the witness.
     if (brain.is_reacting(t)) ++s.decisions;
@@ -225,6 +241,9 @@ int main(int argc, char** argv) {
     total.jumps += s.jumps;
     total.reloads += s.reloads;
     total.dry_ticks += s.dry_ticks;
+    total.build_pieces += s.build_pieces;
+    total.build_edits += s.build_edits;
+    total.boxes += s.boxes;
     total.trigger_ticks += s.trigger_ticks;
     total.trigger_windows += s.trigger_windows;
     total.bursts += s.bursts;
@@ -256,6 +275,11 @@ int main(int argc, char** argv) {
               static_cast<float>(total.build_inputs) / (denom / 60.f));
   std::printf("time in contact: %.1f%% of life\n",
               100.f * total.time_hurt / (total.time_hurt + total.time_safe));
+  std::printf("building: %.2f pieces/s per bot  edits %d  boxes %.2f/min\n",
+              static_cast<float>(total.build_pieces) / (denom / 60.f),
+              total.build_edits,
+              static_cast<float>(total.boxes) /
+                  (static_cast<float>(lives) * static_cast<float>(minutes)));
   std::printf("magazine: %.1f reloads/min  reloading %.1f%% of life\n",
               static_cast<float>(total.reloads) /
                   (static_cast<float>(lives) * static_cast<float>(minutes)),
@@ -317,6 +341,19 @@ int main(int argc, char** argv) {
   if (crouch_per_min > 90.f) {
     std::printf("\nFAIL %.1f crouch changes/min (want <90: frame-rate crouch spam)\n",
                 crouch_per_min);
+    ++failures;
+  }
+  // Building: a bot that never builds is not playing the game, and a bot that
+  // builds every second is a macro. Both are tells, in opposite directions.
+  const float build_hz = static_cast<float>(total.build_pieces) / (denom / 60.f);
+  if (build_hz < 0.02f || build_hz > 2.f) {
+    std::printf("\nFAIL building at %.2f pieces/s per bot (want 0.02..2: either no\n"
+                "building or turbo-building)\n", build_hz);
+    ++failures;
+  }
+  if (total.build_edits == 0) {
+    std::printf("\nFAIL no piece is ever edited (a bot walls up and hides, it does\n"
+                "not fight from what it built)\n");
     ++failures;
   }
   std::printf("\n%s\n", failures == 0 ? "bench OK" : "bench FAILED");

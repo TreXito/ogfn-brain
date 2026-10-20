@@ -83,6 +83,8 @@ if [[ -f "$BENCH" ]]; then
   repertoire=$(grep -oP 'bots with >=4 distinct actions: \K[0-9]+' "$BENCH" | head -1)
   buildps=$(grep -oP '\(\K[0-9.]+(?=/s per bot)' "$BENCH" | head -1)
   contact=$(grep -oP 'time in contact: \K[0-9.]+' "$BENCH" | head -1)
+  buildhz=$(grep -oP 'building: \K[0-9.]+' "$BENCH" | head -1)
+  edits=$(grep -oP 'edits \K[0-9]+' "$BENCH" | head -1)
 
   check() { # name value min max
     local name="$1" v="$2" lo="$3" hi="$4"
@@ -97,6 +99,13 @@ if [[ -f "$BENCH" ]]; then
   check "reaction-held %" "$held" 0 8 || FAILED=1
   check "build inputs/s" "$buildps" 0.5 8 || FAILED=1
   check "time in contact %" "$contact" 5 70 || FAILED=1
+  check "build pieces/s" "$buildhz" 0.02 2 || FAILED=1
+  if [[ -n "$edits" && "$edits" -eq 0 ]]; then
+    report "  piece edits: 0 (bots wall up and hide, they never edit a window)"
+    FAILED=1
+  else
+    report "  piece edits: $edits (ok)"
+  fi
   if [[ -n "$repertoire" && "$repertoire" -lt $((LIVES * 3 / 4)) ]]; then
     report "  repertoire: only $repertoire/$LIVES bots use 4+ actions: TOO NARROW"
     FAILED=1

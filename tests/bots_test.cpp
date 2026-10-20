@@ -477,6 +477,108 @@ static void test_locomotion_jump_cadence_is_human() {
   CHECK(jumps <= 70, "but not once a second for a whole minute");
 }
 
+static void test_building_boxes_up_under_fire() {
+  std::printf("building: boxes up rather than placing one wall and hiding\n");
+  Builder b(persona_w_keyer(), 51);
+  int walls = 0, ramps = 0, floors = 0, cones = 0;
+  std::vector<float> yaws;
+  bool saw_edit = false;
+  // Losing a trade, being shot at, with sky above: the box case.
+  for (int i = 0; i < 60 * 8; ++i) {
+    const BuildInput in = b.update(1.f / 60.f, true, true, 0.2f, 30.f, true);
+    if (in.piece == PieceKind::Wall) ++walls;
+    if (in.piece == PieceKind::Ramp) ++ramps;
+    if (in.piece == PieceKind::Floor) ++floors;
+    if (in.piece == PieceKind::Cone) ++cones;
+    if (in.edit) saw_edit = true;
+    if (in.piece != PieceKind::None) yaws.push_back(in.yaw_deg);
+  }
+  CHECK(walls >= 4, "a losing bot puts walls on more than one side");
+  CHECK(floors >= 1, "and roofs itself, it does not fight in an open-top box");
+  CHECK(cones == 0, "does not spam cones for no reason");
+  CHECK(saw_edit, "uses the pieces it places: an edit happens, not just placement");
+
+  // Four walls of a box must go around, not all in the same plane.
+  int distinct = 0;
+  for (size_t i = 0; i < yaws.size(); ++i) {
+    bool novel = true;
+    for (size_t j = 0; j < i; ++j)
+      if (std::fabs(wrap180(yaws[i] - yaws[j])) < 10.f) novel = false;
+    if (novel) ++distinct;
+  }
+  CHECK(distinct >= 2, "the pieces fan around the bot instead of stacking in one plane");
+}
+
+static void test_building_is_not_a_macro() {
+  std::printf("building: input rate is a hand's, and it misses inputs\n");
+  {
+    Persona slow = persona_camper();
+    slow.build_speed = 0.05f;
+    Persona fast = persona_rotator();
+    fast.build_speed = 0.99f;
+    Builder bs(slow, 52), bf(fast, 53);
+    CHECK(bf.input_hz() > bs.input_hz() * 2, "skill changes build speed");
+    CHECK(bs.input_hz() >= 1.5f && bf.input_hz() <= 8.f, "input rate stays in the human band");
+
+    int slow_n = 0, fast_n = 0;
+    for (int i = 0; i < 60 * 10; ++i) {
+      if (bs.update(1.f / 60.f, true, true, 0.4f, 0.f, true).piece != PieceKind::None) ++slow_n;
+      if (bf.update(1.f / 60.f, true, true, 0.4f, 0.f, true).piece != PieceKind::None) ++fast_n;
+    }
+    const float slow_hz = static_cast<float>(slow_n) / 10.f;
+    const float fast_hz = static_cast<float>(fast_n) / 10.f;
+    CHECK(slow_hz < 4.f, "a slow builder is under 4 pieces/s, not turbo-building");
+    CHECK(fast_hz > slow_hz, "a fast builder places more");
+    CHECK(fast_hz < 9.f, "even the fastest bot does not place at frame rate");
+    // Missing inputs: the achieved rate sits under the nominal rate.
+    CHECK(fast_hz < bf.input_hz(), "inputs are occasionally dropped, like a hand");
+  }
+}
+
+static void test_building_uses_the_box_instead_of_rebuilding_it() {
+  std::printf("building: fights from the box, does not rebuild it every second\n");
+  Builder b(persona_w_keyer(), 57);
+  int pieces = 0;
+  for (int i = 0; i < 60 * 30; ++i) {
+    const BuildInput in = b.update(1.f / 60.f, true, true, 0.2f, 30.f, true);
+    if (in.piece != PieceKind::None) ++pieces;
+  }
+  // A 5-piece box in under a second, then 5 seconds of shooting out of the
+  // window: 30s of sustained fire is about 30 pieces. Without a cooldown the same
+  // bot placed 150, which is a macro.
+  CHECK(pieces > 5, "actually builds under pressure");
+  CHECK(pieces < 60, "does not rebuild the same box continuously (macro tell)");
+}
+
+static void test_building_goal_selection() {
+  std::printf("building: threat and health pick the plan\n");
+  {
+    Builder b(persona_rotator(), 54);
+    for (int i = 0; i < 120; ++i) b.update(1.f / 60.f, false, false, 1.f, 0.f, true);
+    CHECK(b.total_placed() == 0, "nothing is built when nothing is happening");
+    CHECK(b.goal() == BuildGoal::None, "no goal without a threat");
+  }
+  {
+    Builder b(persona_rotator(), 55);
+    bool saw_push = false;
+    for (int i = 0; i < 60 * 6; ++i) {
+      const BuildInput in = b.update(1.f / 60.f, true, false, 0.9f, 0.f, true);
+      if (in.piece == PieceKind::Ramp) saw_push = true;
+    }
+    CHECK(saw_push, "a healthy bot pushes with ramps for height");
+  }
+  {
+    // Indoors: nothing to ramp to, so it must not spam ramps at a ceiling.
+    Builder b(persona_rotator(), 56);
+    int ramps = 0;
+    for (int i = 0; i < 60 * 6; ++i) {
+      const BuildInput in = b.update(1.f / 60.f, true, false, 0.9f, 0.f, false);
+      if (in.piece == PieceKind::Ramp) ++ramps;
+    }
+    CHECK(ramps == 0, "no ramp spam when there is no height to gain");
+  }
+}
+
 static std::string traced_run(uint64_t seed, int ticks) {
   Brain b(persona_rotator(), seed);
   std::string trace;
@@ -578,6 +680,10 @@ int main() {
   test_locomotion_never_frame_rate_crouch_spam();
   test_locomotion_braces_on_a_hard_fall();
   test_locomotion_jump_cadence_is_human();
+  test_building_boxes_up_under_fire();
+  test_building_uses_the_box_instead_of_rebuilding_it();
+  test_building_is_not_a_macro();
+  test_building_goal_selection();
   test_population_spread();
   test_determinism();
   test_lobby_no_mirror_bots();
