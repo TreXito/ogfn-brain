@@ -8,12 +8,16 @@ any third-party binary.
 ## Build and run
 
 ```bash
-make test    # 4000+ assertions, fails if the bots stop feeling human
+make test    # 33000+ assertions, fails if the bots stop feeling human
 make bench   # 64 scripted bot lives, prints behavioural telemetry
 make         # static library for an engine to link
 ```
 
 No cmake, no network, no gtest needed. g++ 15 and make are enough.
+
+`tools/autoloop.sh` builds, tests, runs the bench over several seed ranges, checks
+the telemetry against human-plausible ranges and prints the next thing to work on.
+It runs unattended on a timer; a red loop means a human property regressed.
 
 ## What "human" means here, mechanically
 
@@ -21,8 +25,9 @@ Nine layers, each one a place where a naive bot gives itself away:
 
 1. **Perception** (`perception.cpp`): FOV cone, range limit, occlusion, no
    wallhack, and a 4 second memory after losing sight. Lock-on takes ~0.35s.
+   Teammates are dropped here, before tracking, so no consumer can aim at one.
 2. **Decision cadence** (`brain.cpp`): humans re-plan at roughly 8 Hz, not 60 Hz.
-   Bots commit to an intent for a beat (87% of ticks are "committed"), which is
+   Bots commit to an intent for a beat (~88% of ticks are "committed"), which is
    what removes the frame-to-frame argmax flicker that makes utility AI read as
    robotic.
 3. **Reaction latency** (`brain.cpp`): only a surprise (combat involvement
@@ -32,79 +37,103 @@ Nine layers, each one a place where a naive bot gives itself away:
 4. **Idiosyncrasy** (`persona.cpp`): every bot gets a fixed per-action bias plus
    per-tick jitter, so eight bots with the same utility function still play
    differently, repeatably.
-5. **Motor** (`motor.cpp`): velocity-limited aim servo with overshoot, standing
-   hand jitter, occasional mouse slips, trigger discipline that taps at range and
-   holds up close, a magazine that actually runs dry mid-fight, build cadence
-   scaled to skill, and a flinch before reacting to damage.
-6. **Locomotion** (`locomotion.cpp`): strafing perpendicular to the target with
-   an irregular reversal cadence, a favourite lead shoulder held all match,
-   crouch taps rate-limited to a hand (~4Hz max) plus a hold-cover peek cycle,
-   jumping only to scramble or bail, and no steering at all during a hard fall.
-7. **Loot valuation** (`loot.cpp`): pickups are objects, not a count. Worth is a
+5. **Motor** (`motor.cpp`): velocity-limited aim servo with real overshoot,
+   track-velocity feed-forward so it can hold a sprinting strafe, target leading
+   with per-bot competence, vertical aim and muzzle climb, standing hand jitter,
+   mouse slips, a magazine that runs dry, and trigger discipline that taps at
+   range, sprays through a swing, and holds up close.
+6. **Locomotion** (`locomotion.cpp`): strafes perpendicular to the target with an
+   irregular reversal cadence, a favourite lead shoulder held all match, crouch
+   taps rate-limited to a hand (~4Hz max) plus a hold-cover peek cycle, jumping
+   only to scramble or bail, no steering during a hard fall, and a speed that
+   drifts continuously instead of stepping between four constants.
+7. **Gaze** (`locomotion.cpp` + `brain.cpp`): the view follows the travel
+   direction out of combat, with held shoulder-checks to one flank, and belongs to
+   the fight in one. A bot that walks sideways with its crosshair on nothing is
+   the tell this exists for.
+8. **Loot valuation** (`loot.cpp`): pickups are objects, not a count. Worth is a
    function of what the bot already carries (a big pot at 0 shield is the best
    thing on the floor, the same pot at 100 shield is clutter), distance on a steep
    curve, and how long the circle gives you. Two bots with identical inventories
    disagree because their personas weight it differently.
-9. **Squad** (`squad.cpp`): teammates are excluded from targets at the perception
-   layer, so a bot cannot shoot its own squad no matter what downstream does. Then
-   focus fire (everyone on the same body, called or simply converged), a revive
-   that outranks the plan and is one committed 14s attempt rather than a mode,
-   spacing so two bots never share a doorway, and help calls that a losing bot
-   makes at most every 4s. An empty squad list is a bit-for-bit no-op, so solo
-   lobbies are unchanged.
-8. **Building** (`building.cpp`): plans are sequences, not intentions. Losing a
+9. **Building** (`building.cpp`): plans are sequences, not intentions. Losing a
    trade boxes up (three walls, an edited window, closing wall, roof), a healthy
    push ramps with a wall between each ramp, and a peek is a wall plus a window.
    Inputs run at the bot's own hand rate, inputs are occasionally dropped, and a
-   finished box goes on cooldown so the bot shoots out of it instead of
-   rebuilding it every two seconds.
+   finished box goes on cooldown so the bot shoots out of it instead of rebuilding
+   it every two seconds.
+10. **Squad** (`squad.cpp`): focus fire (everyone on the same body, called or
+    simply converged), a revive that outranks the plan and is one committed 14s
+    attempt rather than a mode, spacing so two bots never share a doorway, and
+    help calls a losing bot makes at most every 4s. An empty squad list is a
+    bit-for-bit no-op, so solo lobbies are unchanged.
+11. **Committed actions** (`brain.cpp`): healing is a 2 to 5 second animation the
+    bot is locked into, can be interrupted by a close threat, and stands still
+    behind cover. Being in the storm outranks taking a fight, from the moment you
+    step outside. Flee needs real danger: never at full health, never from 40m.
 
 Values are simulated, not real, but the shapes are: right-skewed latencies, a
 skill distribution with a heavy tail, and a lobby containing genuinely bad and
 genuinely good players.
 
+## What the bench measures, and the bands it enforces
+
+| property | band | why |
+| --- | --- | --- |
+| trigger duty | 15 to 96% | a bot that never lets go is a hose |
+| reaction held | 0 to 8% of ticks | a latched reaction freezes the bot |
+| build inputs | 0.5 to 8 /s | below is not building, above is a macro |
+| build pieces | 0.02 to 2 /s | turbo-building is machine behaviour |
+| piece edits | > 0 | a bot that walls up and cannot shoot out is in a coffin |
+| loot decisions | > 0, none at the origin | a decision with no destination is a no-op |
+| squad revives / focus / spread | > 0 | the squad layer must not be inert |
+| gaze off travel | p50 < 20 deg | the bot faces where it walks |
+| healing | 1 to 35% of life | never healing, or always in an animation |
+| strafe | > 50% of contact | a bot that stands still in a fight |
+| crouch changes | < 90 /min | frame-rate crouch spam |
+
+Plus tests pinning: flick speed 300 to 800 deg/s and settle 150 to 350ms,
+tracking error against a real sprint strafe, lead signs and magnitudes, vertical
+aim, burst length and shots-per-burst distributions, reload and jump cadence,
+speed continuity, pool spread, determinism, and that a solo lobby is unchanged by
+the squad layer.
+
 ## The improvement loop
 
-`tools/autoloop.sh` is the loop that keeps this improving while nobody watches.
-It runs the tests, runs the bench over a seed range, checks the telemetry against
-human-plausible ranges, appends a report to `logs/autoloop.log`, and prints the
-next thing to work on.
-
 ```bash
-tools/autoloop.sh                 # check + report, no engine call
+tools/autoloop.sh                 # build, check, report
 tools/autoloop.sh --engine "..."  # also invoke an agent CLI with the brief
 ```
 
 ## Next work, ranked
 
-1. **Interpolation tuning against real matches.** Record a human playing, compare
-   reaction and trigger telemetry against `bench`, and move the constants.
-2. **Weapon feel per class.** One `WeaponProfile` now exists (mag + reload), but
+1. **Calibrate against a recorded human match.** Every constant was set from a
+   human band, none from this game's actual replays. That needs a recording.
+2. **Weapon feel per class.** One `WeaponProfile` (mag + reload) exists, but
    shotgun, AR and sniper still share one trigger discipline curve.
 3. **Build failure recovery.** The builder plans; it does not notice when a piece
    is refused (no resource, blocked cell) and re-plan around it.
-4. **Squad revive verification live.** The squad layer is unit tested and measured
-   in the bench, but the adapter has no downed-state or revive verb wiring yet.
-
-Done: movement model (strafe, peek, crouch, fall bracing), the magazine,
-building as a fight (box up, covered ramp push, window edits), loot valuation,
-and squad coordination (focus fire, revive, spacing, help calls).
+4. **Squad revive live.** Unit tested and measured in the bench, but the engine
+   integration has no downed-state or revive verb on 3.5.
 
 ## Integration contract
 
-An engine only needs two calls per tick:
-
 ```cpp
-brain.observe(observation, now);          // ground truth in
-Decision d = brain.think(world_snapshot); // intent out
-MotorOutput m = motor.aim_at(self, yaw, target_pos, d.fire, dt);
-MoveOutput mv = loco.update(dt, yaw, yaw_to_target, dist, d.action == ActionKind::Engage,
-                            m.firing, motor.reloading(), health_frac, move_state);
+brain.observe(observation, now);            // ground truth in, FOV-filtered
+Decision d = brain.think(world_snapshot);   // intent out
+MotorOutput m = motor.aim_at(self, yaw, pitch, target_pos, d.fire, dt, target_motion);
+MoveOutput mv = loco.update(dt, yaw, yaw_to_target, dist, engaged, m.firing,
+                            motor.reloading(), health_frac, move_state,
+                            travel_yaw, travelling);
 BuildInput bi = builder.update(dt, d.action == ActionKind::Build, taking_fire,
                                health_frac, yaw_to_threat, height_available);
-// Loot and ThirdParty read from the world snapshot: w.loot (samples, not a count),
-// w.inventory, w.fight_x/y. A Loot decision walks to brain.loot_choice().pos.
 ```
+
+Carry `m.pitch_deg` back into the next `aim_at`, and hand `TargetMotion`
+(velocity) to the motor or the bot cannot lead. Loot and ThirdParty read from the
+snapshot: `w.loot` (samples, not a count), `w.inventory`, `w.fight_x/y`. A Loot
+decision walks to `brain.loot_choice().pos`. Feed `mv.gaze_yaw_deg` back through
+`brain.set_gaze`.
 
 `Observation` is ground truth and the bot is only allowed to see what
 `Perception` chose to let it see. That is the discipline that keeps the bot
