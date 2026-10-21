@@ -40,8 +40,11 @@ Nine layers, each one a place where a naive bot gives itself away:
 5. **Motor** (`motor.cpp`): velocity-limited aim servo with real overshoot,
    track-velocity feed-forward so it can hold a sprinting strafe, target leading
    with per-bot competence, vertical aim and muzzle climb, standing hand jitter,
-   mouse slips, a magazine that runs dry, and trigger discipline that taps at
-   range, sprays through a swing, and holds up close.
+   mouse slips, and per-class weapons. A gun has a cyclic rate (a rifle ~600 RPM,
+   an SMG ~850, a pump shotgun 0.85s, a bolt sniper 1.45s), its own magazine,
+   burst window, trigger tolerance and recoil, and a single-shot class cannot be
+   held down at all. Holding the trigger is `firing`; a round leaving the barrel
+   is `shot_fired`, and they are not the same boolean.
 6. **Locomotion** (`locomotion.cpp`): strafes perpendicular to the target with an
    irregular reversal cadence, a favourite lead shoulder held all match, crouch
    taps rate-limited to a hand (~4Hz max) plus a hold-cover peek cycle, jumping
@@ -91,6 +94,8 @@ genuinely good players.
 | healing | 1 to 35% of life | never healing, or always in an animation |
 | strafe | > 50% of contact | a bot that stands still in a fight |
 | crouch changes | < 90 /min | frame-rate crouch spam |
+| shots/min per bot | 5 to 400 | a gun firing on every trigger frame is 3600 RPM |
+| shots per burst | 1.5 to 40 | 1 means the trigger is a tap gun, 60 means a hose |
 
 Plus tests pinning: flick speed 300 to 800 deg/s and settle 150 to 350ms,
 tracking error against a real sprint strafe, lead signs and magnitudes, vertical
@@ -109,12 +114,12 @@ tools/autoloop.sh --engine "..."  # also invoke an agent CLI with the brief
 
 1. **Calibrate against a recorded human match.** Every constant was set from a
    human band, none from this game's actual replays. That needs a recording.
-2. **Weapon feel per class.** One `WeaponProfile` (mag + reload) exists, but
-   shotgun, AR and sniper still share one trigger discipline curve.
-3. **Build failure recovery.** The builder plans; it does not notice when a piece
+2. **Build failure recovery.** The builder plans; it does not notice when a piece
    is refused (no resource, blocked cell) and re-plan around it.
-4. **Squad revive live.** Unit tested and measured in the bench, but the engine
+3. **Squad revive live.** Unit tested and measured in the bench, but the engine
    integration has no downed-state or revive verb on 3.5.
+4. **Weapon overlap in the lobby.** Each bot now holds one class for the whole
+   match. Real lobbies swap guns mid-fight, including to an empty slot.
 
 ## Integration contract
 
