@@ -167,13 +167,15 @@ Stats run_life(uint64_t seed, double minutes, bool in_squad = false) {
   Brain brain(p, seed);
   Motor motor(p, seed ^ 0x9E3779B9ull);
   Locomotion loco(p, seed ^ 0x51ED270Bull);
-  motor.set_weapon(WeaponProfile(30, 2.6f));
+  // Each life holds a different class, so the bench measures every trigger curve
+  // rather than one generic gun. Rotating by life keeps it deterministic.
+  const WeaponClass wc = static_cast<WeaponClass>(seed % 4);
+  motor.set_weapon(weapon_for_class(wc));
   Builder builder(p, seed ^ 0xB0117ull);
 
   const float dt = 1.f / 60.f;
   const int ticks = static_cast<int>(minutes * 60.0 / dt);
   float yaw = 0.f;
-  double last_shot = -1e9;
   bool was_firing = false;
   float burst_frames = 0.f;
   Vec3 self_pos{0.f, 0.f, 0.f};
@@ -254,19 +256,20 @@ Stats run_life(uint64_t seed, double minutes, bool in_squad = false) {
       const Vec3 target{w.target_distance, 0.f, 0.f};
       out = motor.aim_at(self_pos, yaw, target, true, dt);
       ++s.trigger_windows;
+      if (out.firing) ++s.trigger_ticks;   // trigger HELD: duty cycle
+      if (out.shot_fired) ++s.shots;       // rounds actually fired
+      // A burst is a trigger HOLD, so it is measured from `firing`, not from rounds:
+      // counting rounds made every automatic look like a burst of one because a round
+      // lands on a single tick inside a held trigger.
       if (out.firing) {
-        ++s.shots;
-        ++s.trigger_ticks;
         if (!was_firing) ++s.bursts;
-        if (was_firing && last_shot > -1e8)
-          burst_frames += 1.f;
+        if (was_firing) burst_frames += 1.f;
       } else if (was_firing) {
         // A burst just ended: record its length in seconds.
         s.burst_lengths.push_back(burst_frames * dt);
         burst_frames = 0.f;
       }
       was_firing = out.firing;
-      last_shot = t;
     } else {
       if (was_firing) {
         s.burst_lengths.push_back(burst_frames * dt);
@@ -432,6 +435,12 @@ int main(int argc, char** argv) {
               total.bursts,
               static_cast<float>(total.bursts) / (static_cast<float>(lives) * static_cast<float>(minutes)),
               pct(all_bursts, 0.50f), pct(all_bursts, 0.90f));
+  // Guns: the cyclic rate is what a player hears. If this is near the tick rate the
+  // weapon is firing once per frame, which is 3600 RPM and sounds like a hose.
+  std::printf("shots/min per bot=%.1f  shots per burst p50=%.1f\n",
+              static_cast<float>(total.shots) /
+                  (static_cast<float>(lives) * static_cast<float>(minutes)),
+              static_cast<double>(total.shots) / std::max(1, total.bursts));
   std::printf("build inputs total=%d (%.2f/s per bot)\n", total.build_inputs,
               static_cast<float>(total.build_inputs) / (denom / 60.f));
   std::printf("time in contact: %.1f%% of life\n",

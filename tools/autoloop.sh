@@ -92,6 +92,8 @@ if [[ -f "$BENCH" ]]; then
   spread=$(grep -oP 'spread orders \K[0-9]+' "$BENCH" | head -1)
   gazep50=$(grep -oP 'gaze: view off travel p50=\K[0-9]+' "$BENCH" | head -1)
   healpct=$(grep -oP 'healing: \K[0-9.]+' "$BENCH" | head -1)
+  rate=$(grep -oP 'shots/min per bot=\K[0-9.]+' "$BENCH" | head -1)
+  perfired=$(grep -oP 'shots per burst p50=\K[0-9.]+' "$BENCH" | head -1)
 
   check() { # name value min max
     local name="$1" v="$2" lo="$3" hi="$4"
@@ -106,6 +108,11 @@ if [[ -f "$BENCH" ]]; then
   check "reaction-held %" "$held" 0 8 || FAILED=1
   check "build inputs/s" "$buildps" 0.5 8 || FAILED=1
   check "time in contact %" "$contact" 5 70 || FAILED=1
+  # Cyclic rate: a gun that fires on every trigger frame is 3600 RPM at 60 Hz, which
+  # is the loudest possible weapon tell across a whole lobby. 20..400 covers a real
+  # mix of classes including a bot that spends most of its life not shooting.
+  check "shots/min per bot" "$rate" 5 400 || FAILED=1
+  check "shots per burst p50" "$perfired" 1.5 40 || FAILED=1
   check "build pieces/s" "$buildhz" 0.02 2 || FAILED=1
   if [[ -n "$edits" && "$edits" -eq 0 ]]; then
     report "  piece edits: 0 (bots wall up and hide, they never edit a window)"

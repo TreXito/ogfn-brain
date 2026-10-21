@@ -541,6 +541,70 @@ static void test_motor_leads_a_moving_target() {
   for (float l : lead_by_skill) CHECK(l < 6.f, "the lead is human-sized, not a prediction lock");
 }
 
+// A gun fires once per trigger-down frame unless something stops it, which at a
+// 60 Hz tick is 3600 RPM. Every weapon in the lobby sounded like the same hose, and
+// a shotgun that held down like a rifle is the first thing a player notices. These
+// are the FEEL differences, measured: cyclic rate, and how many rounds one pull is.
+static void test_weapon_classes_feel_different() {
+  std::printf("motor: gun classes have their own cyclic rate and trigger shape\n");
+  struct Row { WeaponClass c; const char* name; float max_rpm; int max_shots; bool single; };
+  const Row rows[] = {
+      {WeaponClass::Rifle, "rifle", 700.f, 15, false},
+      {WeaponClass::Smg, "smg", 1000.f, 30, false},
+      {WeaponClass::Shotgun, "shotgun", 100.f, 1, true},
+      {WeaponClass::Sniper, "sniper", 60.f, 1, true},
+  };
+  for (const Row& r : rows) {
+    int shots = 0, pulls = 0, max_pull = 0, cur = 0;
+    double secs = 0.0, last_shot = -1.0;
+    for (uint64_t seed = 700; seed < 712; ++seed) {
+      Rng seeder(seed);
+      Persona p = Persona::sample(seeder, 0.f);
+      Motor m(p, seed);
+      m.set_weapon(weapon_for_class(r.c));
+      const Vec3 self{0.f, 0.f, 0.f};
+      float yaw = 0.f, pitch = 0.f, y = 0.f;
+      for (int i = 0; i < 60 * 12; ++i) {
+        const double t = i / 60.0;
+        if (std::fmod(t, 1.1) < 1.0 / 60.0) y = (y > 0.f ? -6.f : 6.f);
+        const MotorOutput o = m.aim_at(self, yaw, pitch, Vec3{14.f, y, 0.f}, true, 1.f / 60.f);
+        yaw = o.yaw_deg;
+        pitch = o.pitch_deg;
+        if (t <= 1.5) continue;
+        secs += 1.0 / 60.0;
+        if (o.shot_fired) ++shots;
+        if (!o.firing) continue;
+        if (last_shot < 0 || t - last_shot > 0.30) {
+          if (cur > max_pull) max_pull = cur;
+          ++pulls;
+          cur = 0;
+        }
+        ++cur;
+        last_shot = t;
+      }
+      if (cur > max_pull) max_pull = cur;
+      last_shot = -1.0;
+      cur = 0;
+    }
+    const double rpm = shots / secs * 60.0;
+    CHECK(rpm > 0.0, "the class fires at all");
+    CHECK(rpm < r.max_rpm, "cyclic rate is a weapon property, not the tick rate");
+    if (r.single) {
+      CHECK(max_pull == 1, "a single-shot weapon cannot be held down");
+    } else {
+      CHECK(max_pull > 1, "an automatic weapon holds a burst");
+    }
+    CHECK(pulls > 10, "and it pulls the trigger repeatedly over a match");
+  }
+  // The classes must not be interchangeable: an SMG out-cycles a shotgun.
+  CHECK(weapon_smg().shot_interval_secs < weapon_rifle().shot_interval_secs,
+        "an SMG cycles faster than a rifle");
+  CHECK(weapon_shotgun().shot_interval_secs > weapon_rifle().shot_interval_secs * 3.f,
+        "a shotgun cycles far slower than a rifle");
+  CHECK(weapon_sniper().tolerance_scale < weapon_shotgun().tolerance_scale,
+        "a sniper needs a tighter crosshair than a shotgun");
+}
+
 // Tracking a strafing target is the thing a bot most obviously fails at: a pure
 // error-driven servo lags by an amount proportional to the target's angular speed,
 // so measured error grew without bound (9.7 deg at 34 deg/s, and 0% of ticks on target
@@ -685,7 +749,7 @@ static void test_motor_runs_dry_and_reloads() {
     const MotorOutput o = m.aim_at(self, yaw, target, true, 1.f / 60.f);
     yaw = o.yaw_deg;
     if (!saw_reload) {
-      if (o.firing) ++shots_before_reload;
+      if (o.shot_fired) ++shots_before_reload;   // rounds, not held frames
       if (m.reloading()) {
         saw_reload = true;
         CHECK(shots_before_reload <= 30, "never fires more rounds than the magazine holds");
@@ -694,7 +758,7 @@ static void test_motor_runs_dry_and_reloads() {
     } else {
       if (m.reloading()) ++reload_ticks;
     }
-    CHECK(!(o.firing && m.reloading()), "cannot fire mid-reload");
+    CHECK(!(o.shot_fired && m.reloading()), "cannot fire mid-reload");
   }
   CHECK(saw_reload, "a bot that holds the trigger eventually reloads");
   CHECK(m.reload_count() > 1, "keeps cycling magazines over a long fight");
@@ -959,6 +1023,21 @@ static void test_locomotion_jump_cadence_is_human() {
     }
   }
   CHECK(jumps > 0, "a cornered bot does try to jump out");
+  // The bail-out must survive becoming a Flee decision. Keying it on `engaged` meant a
+  // hurt bot that decided to RUN stopped jumping, which is backwards: breaking the line
+  // is the moment you hop.
+  {
+    Locomotion run(persona_w_keyer(), 77);
+    MoveState st2{};
+    int run_jumps = 0;
+    for (int i = 0; i < 60 * 20; ++i) {
+      // engaged=false, 8m away, hurt: this is a bot that has decided to leave.
+      const MoveOutput o =
+          run.update(1.f / 60.f, 0.f, 0.f, 8.f, false, false, false, 0.18f, st2);
+      if (o.jumping) ++run_jumps;
+    }
+    CHECK(run_jumps > 0, "a bot running from a lost fight still jumps to break the line");
+  }
   CHECK(jumps <= 70, "but not once a second for a whole minute");
 }
 
@@ -1597,6 +1676,7 @@ int main() {
   test_motor_leads_a_moving_target();
   test_motor_aims_vertically();
   test_motor_flick_speed_is_human();
+  test_weapon_classes_feel_different();
   test_motor_tracks_a_real_strafe();
   test_motor_runs_dry_and_reloads();
   test_motor_tops_up_before_being_caught_dry();
