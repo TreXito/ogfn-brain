@@ -94,6 +94,7 @@ if [[ -f "$BENCH" ]]; then
   healpct=$(grep -oP 'healing: \K[0-9.]+' "$BENCH" | head -1)
   rate=$(grep -oP 'shots/min per bot=\K[0-9.]+' "$BENCH" | head -1)
   perfired=$(grep -oP 'shots per burst p50=\K[0-9.]+' "$BENCH" | head -1)
+  abandon=$(grep -oP 'plans abandoned \K[0-9]+' "$BENCH" | head -1)
 
   check() { # name value min max
     local name="$1" v="$2" lo="$3" hi="$4"
@@ -114,6 +115,14 @@ if [[ -f "$BENCH" ]]; then
   check "shots/min per bot" "$rate" 5 400 || FAILED=1
   check "shots per burst p50" "$perfired" 1.5 40 || FAILED=1
   check "build pieces/s" "$buildhz" 0.02 2 || FAILED=1
+  # Build recovery: the bench refuses 18% of inputs on purpose, so a builder that
+  # never abandons a plan is not reacting to refusals at all.
+  if [[ -z "$abandon" || "$abandon" -eq 0 ]]; then
+    report "  build plans abandoned: 0 (the builder never notices a refused piece)"
+    FAILED=1
+  else
+    report "  build plans abandoned: $abandon (ok)"
+  fi
   if [[ -n "$edits" && "$edits" -eq 0 ]]; then
     report "  piece edits: 0 (bots wall up and hide, they never edit a window)"
     FAILED=1

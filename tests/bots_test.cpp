@@ -1041,6 +1041,55 @@ static void test_locomotion_jump_cadence_is_human() {
   CHECK(jumps <= 70, "but not once a second for a whole minute");
 }
 
+// The builder plans but had no idea whether its plan was executed. A bot whose
+// piece is refused by the world (blocked cell, empty material counter) kept sending
+// the same impossible input at 4 a second for the rest of the fight, which is worse
+// than not building: it is a machine hammering a button.
+static void test_building_recovers_from_a_refusal() {
+  std::printf("building: notices a refused piece and changes what it is doing\n");
+  Rng seeder(31);
+  const Persona p = Persona::sample(seeder, 0.f);
+  const int kTicks = 30 * 30;
+
+  auto run = [&](BuildRefusal why, bool accept) {
+    Builder b(p, 733);
+    int inputs = 0;
+    for (int i = 0; i < kTicks; ++i) {
+      const BuildInput in = b.update(1.f / 30.f, true, true, 0.3f, 0.f, true);
+      if (in.piece == PieceKind::None) continue;
+      ++inputs;
+      b.report_result(accept, why);
+    }
+    return std::make_pair(inputs, b);
+  };
+
+  const auto ok = run(BuildRefusal::None, true);
+  CHECK(ok.first > 10, "a bot whose pieces land keeps building");
+  CHECK(ok.second.plans_abandoned() == 0, "and never abandons a plan that works");
+
+  // Blocked cell: retry once, then stop. Fewer inputs than an honest builder.
+  const auto blocked = run(BuildRefusal::Blocked, false);
+  CHECK(blocked.first > 0, "it does try again, because a refusal can be bad luck");
+  CHECK(blocked.first < ok.first,
+        "but a refused piece means FEWER inputs than a working one, not more");
+  CHECK(blocked.second.plans_abandoned() > 0, "and it gives up on the plan");
+
+  // Empty material counter: stop at once and stay off building.
+  const auto empty = run(BuildRefusal::NoResource, false);
+  CHECK(empty.first <= 3, "out of material it stops almost immediately");
+  CHECK(empty.second.out_of_material(), "and knows it has nothing to build with");
+
+  // Feedback must be optional: a sim that never reports anything is unchanged.
+  {
+    Builder silent(p, 733);
+    int inputs = 0;
+    for (int i = 0; i < kTicks; ++i)
+      if (silent.update(1.f / 30.f, true, true, 0.3f, 0.f, true).piece != PieceKind::None)
+        ++inputs;
+    CHECK(inputs == ok.first, "a harness that reports nothing behaves exactly as before");
+  }
+}
+
 static void test_building_boxes_up_under_fire() {
   std::printf("building: boxes up rather than placing one wall and hiding\n");
   Builder b(persona_w_keyer(), 51);
@@ -1687,6 +1736,7 @@ int main() {
   test_locomotion_speed_is_not_a_state_machine();
   test_locomotion_braces_on_a_hard_fall();
   test_locomotion_jump_cadence_is_human();
+  test_building_recovers_from_a_refusal();
   test_building_boxes_up_under_fire();
   test_building_uses_the_box_instead_of_rebuilding_it();
   test_build_grid_places_pieces_where_a_player_would();

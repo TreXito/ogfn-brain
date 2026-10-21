@@ -33,6 +33,9 @@ struct Stats {
   int committed_ticks = 0;
   int reaction_held = 0;
   int build_inputs = 0;
+  int build_inputs_reported = 0;
+  int build_refusals = 0;
+  int build_abandoned = 0;
   float aim_error_sum = 0.f;
   int aim_error_n = 0;
   int trigger_ticks = 0;
@@ -172,6 +175,7 @@ Stats run_life(uint64_t seed, double minutes, bool in_squad = false) {
   const WeaponClass wc = static_cast<WeaponClass>(seed % 4);
   motor.set_weapon(weapon_for_class(wc));
   Builder builder(p, seed ^ 0xB0117ull);
+  Rng builder_rng(seed ^ 0xB10C0FFEEull);
 
   const float dt = 1.f / 60.f;
   const int ticks = static_cast<int>(minutes * 60.0 / dt);
@@ -290,6 +294,7 @@ Stats run_life(uint64_t seed, double minutes, bool in_squad = false) {
     s.last_crouch = mo.crouching;
     if (mo.jumping) ++s.jumps;
     s.reloads = motor.reload_count();
+    s.build_abandoned = builder.plans_abandoned();
     if (motor.reloading()) ++s.dry_ticks;
 
     // Building: the brain's Build action decides the intent, the builder decides
@@ -298,6 +303,17 @@ Stats run_life(uint64_t seed, double minutes, bool in_squad = false) {
     const bool taking_fire = w.target_is_visible && w.self_health < 70.f;
     const BuildInput bi = builder.update(dt, d.action == ActionKind::Build, taking_fire,
                                          health_frac_pre, 0.f, true);
+    // Report the outcome, so the recovery path is measured rather than assumed. A
+    // real lobby refuses pieces constantly: someone else's wall is in the cell, the
+    // surface is a slope, the bot is mid-air. 18% blocked is a plausible rate, and
+    // without ANY feedback here the builder's recovery code would never run in the
+    // bench and could rot.
+    if (bi.piece != PieceKind::None) {
+      ++s.build_inputs_reported;
+      const bool placed = !(builder_rng.unit() < 0.18f);
+      builder.report_result(placed, placed ? BuildRefusal::None : BuildRefusal::Blocked);
+      if (!placed) ++s.build_refusals;
+    }
     if (d.action == ActionKind::Heal) ++s.heal_ticks;
 
     // Gaze alignment while travelling out of combat. Measured against the travel
@@ -411,6 +427,9 @@ int main(int argc, char** argv) {
     total.trigger_ticks += s.trigger_ticks;
     total.trigger_windows += s.trigger_windows;
     total.bursts += s.bursts;
+    total.build_refusals += s.build_refusals;
+    total.build_inputs_reported += s.build_inputs_reported;
+    total.build_abandoned += s.build_abandoned;
     all_bursts.insert(all_bursts.end(), s.burst_lengths.begin(), s.burst_lengths.end());
 
     // Count how many distinct actions a single bot actually used. A bot with a
@@ -470,6 +489,12 @@ int main(int argc, char** argv) {
       }
     std::printf("loot mix: %s\n", kinds.c_str());
   }
+  std::printf("building: refusals %d of %d inputs (%.0f%%)  plans abandoned %d\n",
+              total.build_refusals, total.build_inputs_reported,
+              total.build_inputs_reported ? 100.f * static_cast<float>(total.build_refusals) /
+                                                static_cast<float>(total.build_inputs_reported)
+                                          : 0.f,
+              total.build_abandoned);
   std::printf("building: %.2f pieces/s per bot  edits %d  boxes %.2f/min\n",
               static_cast<float>(total.build_pieces) / (denom / 60.f),
               total.build_edits,
