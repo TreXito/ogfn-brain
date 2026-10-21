@@ -38,6 +38,8 @@ struct Stats {
   int build_abandoned = 0;
   float aim_error_sum = 0.f;
   int aim_error_n = 0;
+  int aim_n = 0, aim_on_body = 0;
+  std::vector<float> aim_err_ticks;
   int trigger_ticks = 0;
   int trigger_windows = 0;
   int bursts = 0;
@@ -180,6 +182,7 @@ Stats run_life(uint64_t seed, double minutes, bool in_squad = false) {
   const float dt = 1.f / 60.f;
   const int ticks = static_cast<int>(minutes * 60.0 / dt);
   float yaw = 0.f;
+  float pitch_bench = 0.f;   // carried, like an engine carries the camera pitch
   bool was_firing = false;
   float burst_frames = 0.f;
   Vec3 self_pos{0.f, 0.f, 0.f};
@@ -257,8 +260,19 @@ Stats run_life(uint64_t seed, double minutes, bool in_squad = false) {
     // Motor: aim and fire at the target when engaged, otherwise scan.
     MotorOutput out;
     if (d.fire && w.target_is_visible && w.target_distance < 80.f) {
-      const Vec3 target{w.target_distance, 0.f, 0.f};
-      out = motor.aim_at(self_pos, yaw, target, true, dt);
+      // The target STRAFES. A stationary enemy makes every aim statistic better than
+      // reality: the bench reported the crosshair on the body 79.5% of contact ticks
+      // against a human band of 20..60, purely because nothing was moving. Real
+      // strafe speed is 3 to 6 m/s and it reverses, which is the case that matters.
+      const float strafe_m = 3.0f + 3.0f * static_cast<float>((seed % 7)) / 6.f;
+      const float strafe_y = strafe_m * 1.1f *
+                             std::sin(static_cast<float>(t) * 1.4f + static_cast<float>(seed % 5));
+      const Vec3 target{w.target_distance, strafe_y, 0.f};
+      const float vy = strafe_m * 1.1f * 1.4f *
+                       std::cos(static_cast<float>(t) * 1.4f + static_cast<float>(seed % 5));
+      out = motor.aim_at(self_pos, yaw, pitch_bench, target, true, dt,
+                         TargetMotion(Vec3{0.f, vy, 0.f}));
+      pitch_bench = out.pitch_deg;
       ++s.trigger_windows;
       if (out.firing) ++s.trigger_ticks;   // trigger HELD: duty cycle
       if (out.shot_fired) ++s.shots;       // rounds actually fired
@@ -285,6 +299,15 @@ Stats run_life(uint64_t seed, double minutes, bool in_squad = false) {
     yaw = out.yaw_deg;
     s.aim_error_sum += motor.aim_error_deg();
     ++s.aim_error_n;
+    // On-target fraction: the share of ticks the crosshair is within the angular
+    // size of a body at the current range. This is the number a detector computes,
+    // and it is what the fixed-tolerance bug destroyed.
+    if (w.target_is_visible && w.target_distance > 0.5f) {
+      const float body_deg = rad2deg(std::atan2(0.6f, w.target_distance));
+      ++s.aim_n;
+      if (motor.aim_error_deg() < body_deg) ++s.aim_on_body;
+      s.aim_err_ticks.push_back(motor.aim_error_deg());
+    }
     s.build_inputs += motor.build_inputs_this_tick(dt);
 
     // Locomotion already ran above (before the decision).
@@ -427,6 +450,8 @@ int main(int argc, char** argv) {
     total.trigger_ticks += s.trigger_ticks;
     total.trigger_windows += s.trigger_windows;
     total.bursts += s.bursts;
+    total.aim_n += s.aim_n;
+    total.aim_on_body += s.aim_on_body;
     total.build_refusals += s.build_refusals;
     total.build_inputs_reported += s.build_inputs_reported;
     total.build_abandoned += s.build_abandoned;
@@ -489,6 +514,10 @@ int main(int argc, char** argv) {
       }
     std::printf("loot mix: %s\n", kinds.c_str());
   }
+  std::printf("aim: crosshair on the body %.1f%% of contact ticks (human 20..60)\n",
+              total.aim_n ? 100.f * static_cast<float>(total.aim_on_body) /
+                                static_cast<float>(total.aim_n)
+                          : 0.f);
   std::printf("building: refusals %d of %d inputs (%.0f%%)  plans abandoned %d\n",
               total.build_refusals, total.build_inputs_reported,
               total.build_inputs_reported ? 100.f * static_cast<float>(total.build_refusals) /

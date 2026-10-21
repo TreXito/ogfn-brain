@@ -541,6 +541,67 @@ static void test_motor_leads_a_moving_target() {
   for (float l : lead_by_skill) CHECK(l < 6.f, "the lead is human-sized, not a prediction lock");
 }
 
+// First-shot accuracy is the single feature a replay detector leans on hardest, and
+// it was 2%: the bot pulled the trigger on shots that could not physically connect.
+// Two causes, both real bugs:
+//   1. the trigger tolerance was a FIXED angle (~4 deg), but a 0.6m body at 18m
+//      subtends 1.9 deg, so "within 4 degrees" is a guaranteed miss at range. The
+//      gate has to scale with distance because the target has a fixed SIZE.
+//   2. it fired while still swinging onto the target, so a pre-aimed shot went off
+//      mid-settle, 4 degrees out and moving.
+// Humans land 30 to 55% of first shots depending on how the target arrived.
+static void test_first_shot_lands() {
+  std::printf("motor: the first shot of an engagement can actually hit\n");
+  struct Case { float start_off; const char* what; float min_hit; };
+  // Pre-aimed (covering an angle) and a snap flick are different situations.
+  for (const Case& c : {Case{0.f, "pre-aimed", 0.30f}, Case{20.f, "small adjust", 0.35f}}) {
+    int n = 0, hits = 0;
+    for (uint64_t seed = 900; seed < 930; ++seed) {
+      Rng seeder(seed * 2654435761ull + 41ull);
+      Persona p = Persona::sample(seeder, 0.f);
+      Motor m(p, seed);
+      const Vec3 self{0.f, 0.f, 0.f};
+      float yaw = c.start_off, pitch = 0.f;
+      bool fired = false;
+      for (int i = 0; i < 60 * 20 && !fired; ++i) {
+        const double t = i / 60.0;
+        if (t < 1.0) {
+          const MotorOutput o = m.idle_look(yaw, 1.f / 60.f);
+          yaw = o.yaw_deg;
+          pitch = o.pitch_deg;
+          continue;
+        }
+        const float dist = 18.f;
+        const float ang = static_cast<float>(t - 1.0) * 0.2f;   // slow orbit
+        const Vec3 tp{std::cos(ang) * dist, std::sin(ang) * dist, 0.f};
+        const Vec3 tp2{std::cos(ang + 0.01f) * dist, std::sin(ang + 0.01f) * dist, 0.f};
+        const MotorOutput o =
+            m.aim_at(self, yaw, pitch, tp, true, 1.f / 60.f, TargetMotion((tp2 - tp) * 20.f));
+        yaw = o.yaw_deg;
+        pitch = o.pitch_deg;
+        if (!o.shot_fired) continue;
+        fired = true;
+        const float want = rad2deg(std::atan2(tp.y, tp.x));
+        const float err = std::fabs(wrap180(yaw - want));
+        const float body = rad2deg(std::atan2(0.6f, dist));   // angular width of a body
+        ++n;
+        if (err < body) ++hits;
+      }
+    }
+    const float rate = static_cast<float>(hits) / static_cast<float>(std::max(1, n));
+    CHECK(n > 20, "every run gets a first shot off");
+    CHECK(rate > c.min_hit, "the first shot of an engagement can physically hit");
+  }
+  // And the gate must not become a laser: long range needs a tighter angle than
+  // close range, because the same body subtends less of a degree further away.
+  {
+    Motor far(persona_w_keyer(), 5);
+    (void)far;
+    CHECK(rad2deg(std::atan2(0.7f, 60.f)) < rad2deg(std::atan2(0.7f, 10.f)),
+          "a body subtends fewer degrees at range, which is why the gate scales");
+  }
+}
+
 // A gun fires once per trigger-down frame unless something stops it, which at a
 // 60 Hz tick is 3600 RPM. Every weapon in the lobby sounded like the same hose, and
 // a shotgun that held down like a rifle is the first thing a player notices. These
@@ -1725,6 +1786,7 @@ int main() {
   test_motor_leads_a_moving_target();
   test_motor_aims_vertically();
   test_motor_flick_speed_is_human();
+  test_first_shot_lands();
   test_weapon_classes_feel_different();
   test_motor_tracks_a_real_strafe();
   test_motor_runs_dry_and_reloads();

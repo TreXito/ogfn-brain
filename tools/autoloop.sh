@@ -95,6 +95,7 @@ if [[ -f "$BENCH" ]]; then
   rate=$(grep -oP 'shots/min per bot=\K[0-9.]+' "$BENCH" | head -1)
   perfired=$(grep -oP 'shots per burst p50=\K[0-9.]+' "$BENCH" | head -1)
   abandon=$(grep -oP 'plans abandoned \K[0-9]+' "$BENCH" | head -1)
+  onbody=$(grep -oP 'crosshair on the body \K[0-9.]+' "$BENCH" | head -1)
 
   check() { # name value min max
     local name="$1" v="$2" lo="$3" hi="$4"
@@ -114,6 +115,10 @@ if [[ -f "$BENCH" ]]; then
   # mix of classes including a bot that spends most of its life not shooting.
   check "shots/min per bot" "$rate" 5 400 || FAILED=1
   check "shots per burst p50" "$perfired" 1.5 40 || FAILED=1
+  # Crosshair actually on the body: the number a replay detector computes. Below 20
+  # the bot cannot aim; above 60 it is an aimbot. A fixed trigger tolerance once put
+  # this at 79.5 against a STATIONARY target and 2% first-shot accuracy live.
+  check "crosshair on body %" "$onbody" 20 60 || FAILED=1
   check "build pieces/s" "$buildhz" 0.02 2 || FAILED=1
   # Build recovery: the bench refuses 18% of inputs on purpose, so a builder that
   # never abandons a plan is not reacting to refusals at all.
