@@ -593,6 +593,74 @@ static void test_motor_leads_a_moving_target() {
 //   2. it fired while still swinging onto the target, so a pre-aimed shot went off
 //      mid-settle, 4 degrees out and moving.
 // Humans land 30 to 55% of first shots depending on how the target arrived.
+// A gun is not one number, part two: what a round DOES. These stats feed the hit
+// model, so a wrong value here is a bot that cannot kill anything or one that
+// one-shots across the map. Both are instantly visible to a player.
+static void test_weapon_damage_stats_are_per_class() {
+  std::printf("motor: each class carries its own damage and pellet count\n");
+  const WeaponProfile rifle = weapon_rifle();
+  const WeaponProfile smg = weapon_smg();
+  const WeaponProfile shotgun = weapon_shotgun();
+  const WeaponProfile sniper = weapon_sniper();
+
+  // One pellet for the single-projectile guns, many for the spread gun.
+  CHECK(rifle.pellets == 1, "a rifle fires one round per shot");
+  CHECK(smg.pellets == 1, "an SMG fires one round per shot");
+  CHECK(sniper.pellets == 1, "a sniper fires one round per shot");
+  CHECK(shotgun.pellets >= 8, "a shotgun fires a spread of pellets");
+
+  // Per-pellet damage is LOW on a shotgun and the pellet count makes up for it.
+  // Getting this backwards makes a pump the best sniper in the game.
+  CHECK(shotgun.damage < rifle.damage, "a shotgun pellet does less than a rifle round");
+  CHECK(sniper.damage > rifle.damage, "a sniper round does more than a rifle round");
+  CHECK(smg.damage < rifle.damage, "an SMG round does less than a rifle round");
+
+  // Total damage at contact, which is what actually decides a close fight.
+  const float shotgun_total = shotgun.damage * (float)shotgun.pellets;
+  CHECK(shotgun_total > rifle.damage,
+        "up close the whole shotgun spread beats one rifle round");
+  CHECK(shotgun_total < 200.f, "but a point-blank pump is not an instant 200 damage");
+
+  // Range: the shotgun has to fall off earliest, the sniper latest.
+  CHECK(shotgun.falloff_start_m < rifle.falloff_start_m,
+        "a shotgun stops working long before a rifle does");
+  CHECK(smg.falloff_start_m < rifle.falloff_start_m,
+        "an SMG falls off sooner than a rifle");
+  CHECK(sniper.falloff_start_m > rifle.falloff_start_m,
+        "a sniper keeps its damage furthest out");
+  CHECK(sniper.falloff_end_m > sniper.falloff_start_m, "falloff window is not inverted");
+
+  // The BRAIN resolves shots with these, so prove the model agrees: a rifle round at
+  // 8 m on a clean line does real damage, and the same round on the same bot with no
+  // line of sight does none.
+  HitModel hm;
+  Rng rng(11);
+  ShotInput in;
+  in.from = Vec3{0.f, 0.f, 0.f};
+  in.yaw_deg = 0.f;
+  in.pitch_deg = 0.f;
+  in.target_center = Vec3{8.f, 0.f, 0.f};
+  in.distance = 8.f;
+  in.damage = rifle.damage;
+  in.pellets = rifle.pellets;
+  in.falloff_start_m = rifle.falloff_start_m;
+  in.falloff_end_m = rifle.falloff_end_m;
+  const float at_8m = hm.falloff_damage(in);
+  in.target_center = Vec3{80.f, 0.f, 0.f};
+  in.distance = 80.f;
+  const float at_80m = hm.falloff_damage(in);
+  CHECK(at_8m > 20.f, "a rifle round at 8 m is worth most of its damage");
+  CHECK(at_80m < at_8m, "and less of it at 80 m");
+  CHECK(at_80m > 0.f, "but it never reaches zero, so long shots are still worth taking");
+
+  // No line of sight means no damage, whatever the geometry says.
+  ShotInput blocked = in;
+  blocked.has_line_of_sight = false;
+  const ShotOutcome cover = hm.resolve(blocked, rng);
+  CHECK(cover.damage_on_health <= 0.f, "a shot into cover does no health damage");
+  CHECK(cover.damage_on_shield <= 0.f, "and no shield damage either");
+}
+
 // A big pot's worth depends entirely on the shield you are carrying RIGHT NOW. The
 // adapter never filled Inventory::shield, so every bot believed it was bare, valued
 // every pot at maximum, and walked to every pot in sight for a whole match.
@@ -2037,6 +2105,7 @@ int main() {
   test_motor_leads_a_moving_target();
   test_motor_aims_vertically();
   test_motor_flick_speed_is_human();
+  test_weapon_damage_stats_are_per_class();
   test_loot_worth_depends_on_current_shield();
   test_hit_model_resolves_shots();
   test_hit_model_damage_rules();
