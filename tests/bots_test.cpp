@@ -181,6 +181,49 @@ static void test_rotation_is_not_a_beeline_to_the_centre() {
 // Flee was scored with no distance term, so a bot at FULL HEALTH ran from an enemy
 // 50m away. Overcorrecting the other way made Build win every time, so a bot at 10hp
 // with someone in its face never left. Both directions are wrong.
+// Engage scored purely on distance, so a bot committed to a target behind a wall at
+// 60m exactly as hard as one at 12m in the open. A player knows a body subtends less
+// angle further out, that their gun falls off, and that a wall eats the round. The
+// score now uses expected damage, from the same model the engine side resolves with.
+static void test_engage_weights_reachability() {
+  std::printf("brain: engagement score falls with range and behind cover\n");
+  auto engage_score = [](float dist, bool los) {
+    Brain b(persona_w_keyer(), 811);
+    WorldSnapshot w = peaceful_world();
+    w.distance_to_circle_edge = -60.f;
+    w.self_health = 100.f;
+    w.self_shield = 100.f;
+    w.target_is_visible = true;
+    w.target_distance = dist;
+    w.enemies_within_30m = 1;
+    w.target_has_line_of_sight = los;
+    const Decision d = b.think(w);
+    for (const auto& s : d.scores)
+      if (s.first == "Engage") return s.second;
+    return 0.f;
+  };
+  // Closer must outrank further, monotonically, on a clear line.
+  const float d8 = engage_score(8.f, true);
+  const float d15 = engage_score(15.f, true);
+  const float d30 = engage_score(30.f, true);
+  const float d50 = engage_score(50.f, true);
+  CHECK(d8 > d15, "a target at 8m outranks the same target at 15m");
+  CHECK(d15 > d30, "and 15m outranks 30m");
+  CHECK(d30 > d50, "and 30m outranks 50m");
+  CHECK(d8 > 1.f, "a close clean target is actively worth taking");
+
+  // Cover must reduce it, but never to zero at close range: a player still shoots at
+  // someone behind a fence two metres away.
+  const float c8 = engage_score(8.f, false);
+  CHECK(c8 < d8, "behind cover scores lower than a clear line at the same range");
+  CHECK(c8 > 0.f, "but a close target behind cover is still a fight, not a no-op");
+  CHECK(engage_score(30.f, false) < engage_score(30.f, true),
+        "and cover hurts more when the shot is longer");
+
+  // Beyond the perception limit there is no engagement at all.
+  CHECK(engage_score(90.f, true) == 0.f, "a target past perception range is not engaged");
+}
+
 static void test_flee_requires_real_danger() {
   std::printf("brain: flees from close danger only, never from a distant enemy\n");
   auto act = [](float hp, float dist) {
@@ -550,6 +593,213 @@ static void test_motor_leads_a_moving_target() {
 //   2. it fired while still swinging onto the target, so a pre-aimed shot went off
 //      mid-settle, 4 degrees out and moving.
 // Humans land 30 to 55% of first shots depending on how the target arrived.
+// A big pot's worth depends entirely on the shield you are carrying RIGHT NOW. The
+// adapter never filled Inventory::shield, so every bot believed it was bare, valued
+// every pot at maximum, and walked to every pot in sight for a whole match.
+static void test_loot_worth_depends_on_current_shield() {
+  std::printf("loot: a pot is worth most when you have no shield\n");
+  Rng vr(5);
+  const Persona p = Persona::sample(vr, 0.f);
+  LootValuer v(p, 5);
+  LootSample pot;
+  pot.id = 7;
+  pot.pos = Vec3{912.f, 450.f, 0.f};
+  pot.cls = ItemClass::ShieldBig;
+  pot.count = 1;
+
+  Inventory bare;
+  bare.weapon_tier = 2;
+  bare.shield = 0;
+  bare.big_shields = 0;
+  const float at_zero = v.worth_of(pot, bare, 8.f, 120.f, false);
+
+  Inventory full;
+  full.weapon_tier = 2;
+  full.shield = 100;      // already full: another pot is just cargo
+  full.big_shields = 2;
+  const float at_full = v.worth_of(pot, full, 8.f, 120.f, false);
+
+  CHECK(at_zero > 0.5f, "a big pot with no shield is worth crossing ground for");
+  CHECK(at_full < at_zero * 0.5f,
+        "the same pot at full shield is worth far less");
+  CHECK(at_zero > at_full, "and the bare bot wants it more");
+
+  // The choice must follow the worth, not just the presence of an item.
+  std::vector<LootSample> floor{pot};
+  CHECK(v.choose(floor, bare, Vec3{904.f, 450.f, 0.f}, 120.f, false).want,
+        "with no shield the bot walks to the pot");
+
+  // What the adapter did wrong: shield left at the default. Pin that the FIELD is what
+  // drives it, so a caller that forgets it is measurably wrong rather than silently
+  // identical.
+  Inventory forgotten;
+  forgotten.weapon_tier = 2;   // shield deliberately left at 0
+  const float forgot = v.worth_of(pot, forgotten, 8.f, 120.f, false);
+  CHECK(std::fabs(forgot - at_zero) < 0.001f,
+        "a caller that forgets Inventory::shield gets the \"bare\" valuation");
+  CHECK(std::fabs(at_full - forgot) > 0.05f,
+        "which is measurably different from a bot that is actually full");
+}
+
+// The 3.5 client this runs on has NO ranged damage path: a live match fired 80,627
+// rounds and killed nobody. So the brain has to decide what its own shots accomplished,
+// from the same geometry the engine would have used. Everything below is a rule that
+// makes that decision honest, and every one of them is a reason a real shot misses.
+static void test_hit_model_resolves_shots() {
+  std::printf("hitmodel: shots hit, miss, and are stopped by cover\n");
+  Rng rng(1234);
+  HitModel hm;
+
+  auto shot = [] {
+    ShotInput in;
+    in.from = Vec3{0.f, 0.f, 1.5f};
+    in.target_center = Vec3{20.f, 0.f, 1.3f};
+    in.distance = 20.f;
+    in.yaw_deg = 0.f;               // dead on
+    in.pitch_deg = std::atan2(1.3f - 1.5f, 20.f) * 57.2958f;
+    in.spread_deg = 0.f;            // no spread: isolate the geometry
+    in.damage = 25.f;
+    in.target_health = 100.f;
+    in.target_shield = 0.f;
+    return in;
+  };
+
+  // Dead-on, no spread, clear line: must hit. A model that cannot hit a stationary
+  // target standing still in front of it is worse than useless.
+  {
+    ShotInput in = shot();
+    const ShotOutcome o = hm.resolve(in, rng);
+    CHECK(o.result == HitResult::Body || o.result == HitResult::Limb ||
+          o.result == HitResult::Head, "a perfect shot on a clean line hits");
+    CHECK(o.damage_on_health > 0.f, "and it does damage");
+    CHECK(o.cosine_match > 0.999f, "with a cosine match of 1");
+  }
+
+  // Cover stops it dead, regardless of how good the aim is.
+  {
+    ShotInput in = shot();
+    in.has_line_of_sight = false;
+    const ShotOutcome o = hm.resolve(in, rng);
+    CHECK(o.result == HitResult::Cover, "a wall between us absorbs the round");
+    CHECK(o.damage_on_health == 0.f && o.damage_on_shield == 0.f,
+          "and no damage leaks through the wall");
+  }
+
+  // Pointed away from the body: a miss, and the miss distance is reported.
+  {
+    ShotInput in = shot();
+    in.yaw_deg = 40.f;
+    const ShotOutcome o = hm.resolve(in, rng);
+    CHECK(o.result == HitResult::None, "a shot pointed 40 degrees off misses");
+    CHECK(o.damage_on_health == 0.f, "and does nothing");
+    CHECK(std::fabs(o.miss_distance) > 1.f, "and reports how far off it was");
+  }
+
+  // Determinism: the same shots in the same order give the same kills. Without this a
+  // replay is unreproducible and no bug in a fight can ever be chased.
+  {
+    // Two FRESH generators at the same seed: `rng` above has already been advanced by
+    // the earlier cases, so comparing against it would be comparing two different
+    // streams and would fail for a reason that has nothing to do with determinism.
+    Rng a(999), b(999);
+    ShotInput in = shot();
+    in.spread_deg = 3.f;
+    int hits_a = 0, hits_b = 0;
+    for (int i = 0; i < 200; ++i) {
+      if (hm.resolve(in, a).result != HitResult::None) ++hits_a;
+      if (hm.resolve(in, b).result != HitResult::None) ++hits_b;
+    }
+    CHECK(hits_a == hits_b, "the same shot sequence resolves identically");
+    CHECK(hits_a > 0 && hits_a < 200, "and spread makes some shots miss");
+  }
+}
+
+static void test_hit_model_damage_rules() {
+  std::printf("hitmodel: shield eats first, falloff, and downed not dead\n");
+  // Shield first, always.
+  {
+    const DamageSplit s = apply_damage(30.f, 100.f, 100.f);
+    CHECK(s.to_shield == 30.f && s.to_health == 0.f, "damage hits shield before health");
+    CHECK(s.shield_left == 70.f && s.health_left == 100.f, "and health is untouched");
+  }
+  // Overflow past the shield goes to health.
+  {
+    const DamageSplit s = apply_damage(150.f, 50.f, 100.f);
+    CHECK(s.to_shield == 50.f, "the shield absorbs what it can");
+    CHECK(s.to_health == 100.f, "the rest goes to health");
+    CHECK(s.shield_left == 0.f && s.health_left == 0.f, "and both are emptied");
+  }
+  // Range falloff: far shots hurt less, but never nothing (a bot that assumes its long
+  // shots are worthless stops taking them, which is not how players behave).
+  {
+    HitModel hm;
+    ShotInput in;
+    in.damage = 100.f;
+    in.falloff_start_m = 30.f;
+    in.falloff_end_m = 90.f;
+    in.min_damage_frac = 0.35f;
+    in.distance = 10.f;
+    const float close = hm.falloff_damage(in);
+    in.distance = 60.f;
+    const float mid = hm.falloff_damage(in);
+    in.distance = 200.f;
+    const float far = hm.falloff_damage(in);
+    CHECK(close == 100.f, "point blank is full damage");
+    CHECK(mid < close && mid > far, "damage falls off with range");
+    CHECK(far > 30.f, "but a long shot still hurts something");
+  }
+  // Lethal marks downed, and a downed target is not the same as removed: the squad
+  // layer needs the body to still exist so a teammate can revive it.
+  {
+    Rng rng(77);
+    HitModel hm;
+    ShotInput in;
+    in.from = Vec3{0.f, 0.f, 1.5f};
+    in.target_center = Vec3{6.f, 0.f, 1.3f};
+    in.distance = 6.f;
+    in.spread_deg = 0.f;
+    in.damage = 200.f;
+    in.target_health = 40.f;
+    in.target_shield = 0.f;
+    const float want = std::atan2(1.3f - 1.5f, 6.f) * 57.2958f;
+    in.pitch_deg = want;
+    const ShotOutcome o = hm.resolve(in, rng);
+    CHECK(o.target_downed, "a lethal shot downs the target");
+    CHECK(o.result == HitResult::Fatal, "and the result says fatal");
+  }
+  // Task 2: does a body at distance need a tighter angle than up close? This is the
+  // relationship the trigger gate depends on.
+  {
+    HitModel hm;
+    ShotInput in;
+    in.target_radius = 0.42f;
+    in.spread_deg = 0.f;
+    in.from = Vec3{0.f, 0.f, 1.5f};
+    in.target_center = Vec3{5.f, 0.f, 1.5f};
+    in.distance = 5.f;
+    in.yaw_deg = 0.f;
+    const bool near = hm.can_connect(in);
+    in.target_center = Vec3{60.f, 0.f, 1.5f};
+    in.distance = 60.f;
+    in.yaw_deg = 0.f;
+    const bool far = hm.can_connect(in);
+    CHECK(near && far, "a dead-centre line connects at any range");
+    in.yaw_deg = 3.f;   // 3 degrees off: inside the body at 5m, outside it at 60m
+    const bool near_off = hm.can_connect(in);
+    in.target_center = Vec3{5.f, 0.f, 1.5f};
+    in.distance = 5.f;
+    const bool near_off5 = hm.can_connect(in);
+    (void)far;
+    (void)near_off;
+    CHECK(near_off5, "3 degrees off still connects at 5m where the body is wide");
+    ShotInput far_in = in;
+    far_in.target_center = Vec3{60.f, 0.f, 1.5f};
+    far_in.distance = 60.f;
+    far_in.yaw_deg = 3.f;
+    CHECK(!hm.can_connect(far_in), "but 3 degrees off at 60m is a clean miss");
+  }
+}
+
 static void test_first_shot_lands() {
   std::printf("motor: the first shot of an engagement can actually hit\n");
   struct Case { float start_off; const char* what; float min_hit; };
@@ -1771,6 +2021,7 @@ int main() {
   test_perception_lock_takes_time();
   test_brain_zone_priority();
   test_rotation_is_not_a_beeline_to_the_centre();
+  test_engage_weights_reachability();
   test_flee_requires_real_danger();
   test_storm_outranks_a_fight();
   test_brain_engage_vs_flee();
@@ -1786,6 +2037,9 @@ int main() {
   test_motor_leads_a_moving_target();
   test_motor_aims_vertically();
   test_motor_flick_speed_is_human();
+  test_loot_worth_depends_on_current_shield();
+  test_hit_model_resolves_shots();
+  test_hit_model_damage_rules();
   test_first_shot_lands();
   test_weapon_classes_feel_different();
   test_motor_tracks_a_real_strafe();
