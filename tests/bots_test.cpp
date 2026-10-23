@@ -593,6 +593,76 @@ static void test_motor_leads_a_moving_target() {
 //   2. it fired while still swinging onto the target, so a pre-aimed shot went off
 //      mid-settle, 4 degrees out and moving.
 // Humans land 30 to 55% of first shots depending on how the target arrived.
+// Being shot from outside your view cone is how you learn to turn around. Gating
+// perception on FOV meant a shooter behind you was never even tracked, so a bot walked
+// calmly away from fire in its back: no player does that.
+static void test_damage_registers_from_outside_fov() {
+  std::printf("perception: a shot in the back still registers\n");
+  PerceptionConfig cfg;
+  cfg.fov_half_deg = 40.f;   // narrow, so "behind" is unambiguous
+  cfg.max_range = 90.f;
+  Perception pc(cfg);
+
+  Observation obs;
+  obs.self_pos = Vec3{0.f, 0.f, 0.f};
+  obs.self_yaw_deg = 0.f;    // looking down +x
+
+  // Directly BEHIND, visible to a trace, not in FOV, and it just shot us.
+  EnemySample behind;
+  behind.id = 77;
+  behind.pos = Vec3{-12.f, 0.f, 0.f};
+  behind.line_of_sight = true;
+  behind.damaged_me = true;
+  obs.enemies.push_back(behind);
+  pc.update(obs, 1.0);
+
+  CHECK(pc.by_id(77) != nullptr,
+        "an enemy that shoots you is tracked even standing behind you");
+  const TrackedTarget* n = pc.nearest(true);
+  CHECK(n != nullptr && n->id == 77, "and it becomes the nearest target to deal with");
+
+  // The same enemy, same position, but NOT shooting: normal FOV rules apply.
+  Perception pc2(cfg);
+  Observation quiet = obs;
+  quiet.enemies[0].damaged_me = false;
+  pc2.update(quiet, 1.0);
+  CHECK(pc2.by_id(77) == nullptr,
+        "silently behind you it stays untracked (FOV still means something)");
+
+  // An aggressor outranks a closer bystander, even when the bystander is in front.
+  Perception pc3(cfg);
+  Observation two;
+  two.self_pos = Vec3{0.f, 0.f, 0.f};
+  two.self_yaw_deg = 0.f;
+  EnemySample close_body;
+  close_body.id = 11;
+  close_body.pos = Vec3{4.f, 0.f, 0.f};      // 4 m, straight ahead
+  close_body.line_of_sight = true;
+  two.enemies.push_back(close_body);
+  EnemySample shooter;
+  shooter.id = 22;
+  shooter.pos = Vec3{-20.f, 0.f, 0.f};       // 20 m behind, and shooting
+  shooter.line_of_sight = true;
+  shooter.damaged_me = true;
+  two.enemies.push_back(shooter);
+  pc3.update(two, 2.0);
+  const TrackedTarget* pick = pc3.nearest(true);
+  CHECK(pick != nullptr && pick->id == 22,
+        "the bot deals with whoever is shooting it, not the nearer bystander");
+
+  // The memory expires: an old aggressor must not outrank forever, or a bot would
+  // keep facing a ghost instead of the real threat in front of it.
+  Perception pc4(cfg);
+  Observation later = two;
+  later.enemies[1].damaged_me = false;      // stopped shooting
+  later.enemies[1].line_of_sight = false;   // and gone
+  pc4.update(two, 100.0);                   // shot at t=100
+  pc4.update(later, 104.5);                 // 4.5s later: past the 3s window
+  const TrackedTarget* after = pc4.nearest(true);
+  CHECK(after != nullptr && after->id == 11,
+        "once the shooting stops the closer, visible enemy wins again");
+}
+
 // A gun is not one number, part two: what a round DOES. These stats feed the hit
 // model, so a wrong value here is a bot that cannot kill anything or one that
 // one-shots across the map. Both are instantly visible to a player.
@@ -2105,6 +2175,7 @@ int main() {
   test_motor_leads_a_moving_target();
   test_motor_aims_vertically();
   test_motor_flick_speed_is_human();
+  test_damage_registers_from_outside_fov();
   test_weapon_damage_stats_are_per_class();
   test_loot_worth_depends_on_current_shield();
   test_hit_model_resolves_shots();
