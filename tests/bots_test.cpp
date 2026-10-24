@@ -593,6 +593,58 @@ static void test_motor_leads_a_moving_target() {
 //   2. it fired while still swinging onto the target, so a pre-aimed shot went off
 //      mid-settle, 4 degrees out and moving.
 // Humans land 30 to 55% of first shots depending on how the target arrived.
+// Weapons by their REAL asset names. The live client's assault rifles are
+// WID_Assault_*, with no "rifle" anywhere in the path, so a classifier keyed on
+// "rifle" sees every AR in the game as Unknown loot.
+static void test_real_weapon_paths_classify() {
+  std::printf("loot: real WID_ paths classify as weapons\n");
+  const char* ars[] = {
+      "WID_Assault_Scavenger_VR_Ore_T02",
+      "WID_Assault_Burst_VR_Ore_T06",
+      "WID_Assault_Dragon_VR_Ore_T01",
+      "WID_Assault_Raygun_SR_Ore_T04",
+      "WID_Assault_Auto_Halloween_SR_Ore_T01",
+      "AthenaWeapon:WID_Assault_Auto_Athena_C",
+  };
+  for (const char* p : ars) CHECK(classify_item(p) == ItemClass::AssaultRifle, p);
+
+  CHECK(classify_item("WID_Shotgun_Standard_Athena_C") == ItemClass::Shotgun,
+        "a real shotgun path classifies");
+  CHECK(classify_item("WID_Sniper_Standard_Athena_C") == ItemClass::Sniper,
+        "a real sniper path classifies");
+  CHECK(classify_item("WID_Pistol_Standard_Athena_C") == ItemClass::Pistol,
+        "a real pistol path classifies");
+  CHECK(classify_item("WID_SMG_Standard_Athena_C") == ItemClass::AssaultRifle,
+        "an SMG folds into the automatic-weapon class");
+  // Ammo and materials share WID_ prefixes, so they must not be mistaken for guns.
+  CHECK(classify_item("WID_Ammo_Medium_Athena_C") == ItemClass::Ammo,
+        "ammo stays ammo, not a rifle");
+}
+
+// A shield the classifier does not recognise is a shield the bot never picks up. Real
+// builds have shipped several spellings; missing one makes full shield pots invisible.
+static void test_shield_spellings_are_recognised() {
+  std::printf("loot: shields classify under every spelling the game ships\n");
+  const char* big[] = {
+      "/Game/Items/Consumables/Shields/Athena_Shield_Potion.Athena_Shield_Potion",
+      "/Game/Items/Consumables/Shields/Athena_ShieldMedium.Athena_ShieldMedium",
+      "/Game/Items/Consumables/Shields/Athena_ShieldLarge.Athena_ShieldLarge",
+      "ShieldPotion",
+  };
+  for (const char* p : big) CHECK(classify_item(p) == ItemClass::ShieldBig, p);
+
+  const char* small[] = {
+      "/Game/Items/Consumables/Shields/Athena_Small_Shield_Potion.Athena_Small_Shield_Potion",
+      "Athena_ShieldSmall",
+      "SmallShield",
+  };
+  for (const char* p : small) CHECK(classify_item(p) == ItemClass::ShieldPotion, p);
+
+  // A random item must still be Unknown: the fallback matters as much as the matches.
+  CHECK(classify_item("/Game/Items/Misc/GiftBox.GiftBox") == ItemClass::Unknown,
+        "an unrelated item stays Unknown");
+}
+
 // Being shot from outside your view cone is how you learn to turn around. Gating
 // perception on FOV meant a shooter behind you was never even tracked, so a bot walked
 // calmly away from fire in its back: no player does that.
@@ -2175,6 +2227,8 @@ int main() {
   test_motor_leads_a_moving_target();
   test_motor_aims_vertically();
   test_motor_flick_speed_is_human();
+  test_real_weapon_paths_classify();
+  test_shield_spellings_are_recognised();
   test_damage_registers_from_outside_fov();
   test_weapon_damage_stats_are_per_class();
   test_loot_worth_depends_on_current_shield();
