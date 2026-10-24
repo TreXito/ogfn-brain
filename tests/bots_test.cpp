@@ -593,6 +593,43 @@ static void test_motor_leads_a_moving_target() {
 //   2. it fired while still swinging onto the target, so a pre-aimed shot went off
 //      mid-settle, 4 degrees out and moving.
 // Humans land 30 to 55% of first shots depending on how the target arrived.
+// Engaging must be a move TOWARD the fight. It used to set move_to to the circle centre,
+// so an engaging bot walked to the middle of the map: every bot in every fight pulled
+// toward the same point, which is how a fleet ends up stacked in one small box.
+static void test_engage_moves_toward_the_fight_not_the_zone_centre() {
+  std::printf("brain: Engage advances toward the target, not the zone centre\n");
+  Brain brain(Persona::sample(*new Rng(7), 0.f), 7);
+
+  WorldSnapshot w;
+  w.self_pos = Vec3{0.f, 0.f, 0.f};
+  w.circle_center_x = 10000.f;   // the zone centre is a mile away
+  w.circle_center_y = 10000.f;
+  w.circle_next_center_x = 10000.f;
+  w.circle_next_center_y = 10000.f;
+  w.circle_radius = 500.f;
+  w.distance_to_circle_edge = -400.f;   // comfortably inside, nothing to flee
+  w.has_weapon = true;
+  w.target_is_visible = true;
+  w.target_distance = 40.f;
+  w.target_pos = Vec3{40.f, 0.f, 0.f};   // due +x
+  w.target_health = 100.f;
+
+  const Decision d = brain.intent_for(ActionKind::Engage, w);
+  // Toward the enemy (+x), and NOT toward the far-off circle centre.
+  CHECK(d.move_to.x > 0.f, "Engage moves toward the target");
+  CHECK(d.move_to.x < 40.f, "and stops short of standing on it");
+  CHECK(d.move_to.y < 1.f && d.move_to.y > -1.f, "with no sideways drift");
+  CHECK(d.fire, "it is still shooting while it advances");
+
+  // Already at fighting range: hold ground rather than walking through the enemy.
+  WorldSnapshot near = w;
+  near.target_distance = 6.f;
+  near.target_pos = Vec3{6.f, 0.f, 0.f};
+  const Decision d2 = brain.intent_for(ActionKind::Engage, near);
+  CHECK(std::fabs(d2.move_to.x - near.self_pos.x) < 0.5f,
+        "inside the standoff it holds position instead of advancing");
+}
+
 // An unarmed player crosses ground for a gun. The flat distance curve charged the same
 // for a rifle at 40m as a bandage at 6m, so an unarmed bot would stay in the open and
 // never arm itself: exactly the "bot stands there doing nothing" look.
@@ -2280,6 +2317,7 @@ int main() {
   test_motor_leads_a_moving_target();
   test_motor_aims_vertically();
   test_motor_flick_speed_is_human();
+  test_engage_moves_toward_the_fight_not_the_zone_centre();
   test_unarmed_bot_will_walk_for_a_gun();
   test_real_weapon_paths_classify();
   test_shield_spellings_are_recognised();
