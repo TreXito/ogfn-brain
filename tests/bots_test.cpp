@@ -593,6 +593,59 @@ static void test_motor_leads_a_moving_target() {
 //   2. it fired while still swinging onto the target, so a pre-aimed shot went off
 //      mid-settle, 4 degrees out and moving.
 // Humans land 30 to 55% of first shots depending on how the target arrived.
+// An unarmed player crosses ground for a gun. The flat distance curve charged the same
+// for a rifle at 40m as a bandage at 6m, so an unarmed bot would stay in the open and
+// never arm itself: exactly the "bot stands there doing nothing" look.
+static void test_unarmed_bot_will_walk_for_a_gun() {
+  std::printf("loot: an unarmed bot walks a long way for a gun\n");
+  Rng r(3);
+  const Persona p = Persona::sample(r, 0.f);
+  LootValuer v(p, 3);
+
+  LootSample gun;
+  gun.id = 11;
+  gun.pos = Vec3{40.f, 0.f, 0.f};
+  gun.cls = ItemClass::AssaultRifle;
+  gun.count = 1;
+
+  Inventory empty;            // no weapon at all
+  empty.weapon_tier = 0;
+  const float unarmed_far = v.worth_of(gun, empty, 40.f, 120.f, false);
+
+  Inventory armed;
+  armed.weapon_tier = 2;      // already has a gun: a second one is cargo
+  const float armed_far = v.worth_of(gun, armed, 40.f, 120.f, false);
+
+  CHECK(unarmed_far > armed_far * 3.f,
+        "a rifle 40m away is worth far more to an unarmed bot than to an armed one");
+
+  // And it must actually beat staying put: the choice has to be taken.
+  std::vector<LootSample> floor{gun};
+  const LootChoice c = v.choose(floor, empty, Vec3{0.f, 0.f, 0.f}, 120.f, false);
+  CHECK(c.want, "an unarmed bot with a rifle 40m away decides to go and get it");
+
+  // AND the search radius has to reach it. A rifle 90m away is inside an unarmed
+  // player's range of attention and outside an armed one's.
+  LootSample far_gun = gun;
+  far_gun.id = 13;
+  far_gun.pos = Vec3{90.f, 0.f, 0.f};
+  std::vector<LootSample> far_floor{far_gun};
+  CHECK(v.choose(far_floor, empty, Vec3{0.f, 0.f, 0.f}, 120.f, false).want,
+        "an unarmed bot will cross 90m for a rifle");
+  CHECK(!v.choose(far_floor, armed, Vec3{0.f, 0.f, 0.f}, 120.f, false).want,
+        "but an armed bot will not: 90m stays a rotation decision");
+
+  // The gentler curve must NOT apply to a bandage: a bandage at 40m is still not worth
+  // crossing the map for, or bots turn into vacuum cleaners again.
+  LootSample bandage = gun;
+  bandage.id = 12;
+  bandage.cls = ItemClass::Bandage;
+  bandage.pos = Vec3{40.f, 0.f, 0.f};
+  const float bandage_far = v.worth_of(bandage, empty, 40.f, 120.f, false);
+  CHECK(bandage_far < unarmed_far,
+        "a distant gun still outranks a distant bandage for an unarmed bot");
+}
+
 // Weapons by their REAL asset names. The live client's assault rifles are
 // WID_Assault_*, with no "rifle" anywhere in the path, so a classifier keyed on
 // "rifle" sees every AR in the game as Unknown loot.
@@ -2227,6 +2280,7 @@ int main() {
   test_motor_leads_a_moving_target();
   test_motor_aims_vertically();
   test_motor_flick_speed_is_human();
+  test_unarmed_bot_will_walk_for_a_gun();
   test_real_weapon_paths_classify();
   test_shield_spellings_are_recognised();
   test_damage_registers_from_outside_fov();
