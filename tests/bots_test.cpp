@@ -1893,7 +1893,22 @@ static void test_loot_distance_and_clock() {
   const float mid = v.worth_of(pot, inv, 15.f, 60.f, false);
   const float far = v.worth_of(pot, inv, 40.f, 60.f, false);
   CHECK(near > mid && mid > far, "further loot is worth less");
-  CHECK(far * 4.f < near, "the cost curve is steep, not linear (no vacuuming the map)");
+
+  // The curve is steep for things you do NOT need. A trap is clutter when you have no
+  // shield; a shield pot is not, and since the under-geared rule landed, a shieldless bot
+  // crossing ground for a pot is correct behaviour rather than vacuuming.
+  const LootSample trap{6, Vec3(0.f, 0.f, 0.f), ItemClass::Trap, 1};
+  const float trap_near = v.worth_of(trap, inv, 3.f, 60.f, false);
+  const float trap_far = v.worth_of(trap, inv, 40.f, 60.f, false);
+  CHECK(trap_far * 4.f < trap_near, "the cost curve is steep for things you do not need");
+
+  // And once geared, the same pot obeys the steep curve again.
+  Inventory geared;
+  geared.weapon_tier = 2;
+  geared.shield = 100;
+  const float g_near = v.worth_of(pot, geared, 3.f, 60.f, false);
+  const float g_far = v.worth_of(pot, geared, 40.f, 60.f, false);
+  CHECK(g_far * 3.f < g_near, "a geared bot does not walk 40m for a pot");
 
   const float lots_of_time = v.worth_of(pot, inv, 10.f, 60.f, false);
   const float no_time = v.worth_of(pot, inv, 10.f, 4.f, false);
