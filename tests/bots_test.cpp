@@ -593,6 +593,35 @@ static void test_motor_leads_a_moving_target() {
 //   2. it fired while still swinging onto the target, so a pre-aimed shot went off
 //      mid-settle, 4 degrees out and moving.
 // Humans land 30 to 55% of first shots depending on how the target arrived.
+// A player with no materials does not plan a box-up. Scoring Build anyway is what
+// produced refused build inputs: the bot kept asking for pieces it could not pay for.
+static void test_build_requires_materials() {
+  std::printf("brain: building needs materials\n");
+  Brain brain(Persona::sample(*new Rng(9), 0.f), 9);
+
+  WorldSnapshot w;
+  w.self_pos = Vec3{0.f, 0.f, 0.f};
+  w.has_weapon = true;
+  w.target_is_visible = true;
+  w.target_distance = 10.f;
+  w.target_pos = Vec3{10.f, 0.f, 0.f};
+  w.self_health = 40.f;          // hurt, being shot at: the box-up case
+  w.recently_damaged = true;
+
+  w.inventory.materials = 0;
+  CHECK(brain.score_for(ActionKind::Build, w) == 0.f, "no materials, no build");
+
+  w.inventory.materials = kMaterialsPerPiece;   // exactly one piece
+  CHECK(brain.score_for(ActionKind::Build, w) > 0.f, "one piece of material is enough to box up");
+
+  // And the other two gates still hold: not shot at, and healthy, means no build.
+  WorldSnapshot calm = w;
+  calm.recently_damaged = false;
+  calm.self_health = 100.f;
+  CHECK(brain.score_for(ActionKind::Build, calm) == 0.f,
+        "not being shot at and not hurt means no building");
+}
+
 // Engaging must be a move TOWARD the fight. It used to set move_to to the circle centre,
 // so an engaging bot walked to the middle of the map: every bot in every fight pulled
 // toward the same point, which is how a fleet ends up stacked in one small box.
@@ -2332,6 +2361,7 @@ int main() {
   test_motor_leads_a_moving_target();
   test_motor_aims_vertically();
   test_motor_flick_speed_is_human();
+  test_build_requires_materials();
   test_engage_moves_toward_the_fight_not_the_zone_centre();
   test_unarmed_bot_will_walk_for_a_gun();
   test_real_weapon_paths_classify();
